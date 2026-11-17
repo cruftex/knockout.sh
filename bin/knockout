@@ -9,14 +9,19 @@ set -euo pipefail
 #
 # Test Runner (Bash)
 #
-# Runs executable files or .sh scripts given as arguments.
-# Directories are expanded to their contained files (non-recursive).
-# All files are collected first before execution.
+# Runs the test files of test directories. Directories are expanded to their
+# contained files (non-recursive). All files are collected first before execution.
+#
+# Commands (a positional argument is always a command):
+# - run (default): run the test directories given with -d, or, without -d,
+#   all test directories found below the current directory (project mode).
+# - fn-suite: print the bash t_* testsuite handler (see below).
+# - Anything else: print usage and exit 1. Single tests are run by calling them directly.
 #
 # Execution rules:
 # - Executable files are run directly.
 # - Non-executable *.sh files are run via bash.
-# - Missing or non-runnable files/directories cause a fatal error ("die").
+# - Missing test directories or non-runnable files cause a fatal error ("die").
 #
 # Test protocol (simple tests):
 # - A test is a normal program or script.
@@ -70,9 +75,10 @@ set -euo pipefail
 #
 # Optional parameters:
 # - -v : pass test stdout/stderr through in addition to capturing
-# - -d : keep temporary directory after execution
+# - -k : keep temporary directory after execution
+# - -d <dir> : test directory to run (repeatable); disables project mode
 #
-# Project mode (no file/dir arguments):
+# Project mode (run without -d):
 # - Run all test directories found recursively below the current directory:
 #     * directories named "knockout-tests"
 #     * directories containing a marker file ".knockout-tests"
@@ -90,7 +96,7 @@ set -euo pipefail
 #   (unit tests). Only a few integration tests run the complete script.
 # - test/knockout-test.sh runs the same t_* functions a second time without
 #   any knockout as harness, so a runner bug cannot hide failing tests.
-# - Testing another implementation: KO_UNDER_TEST=/path/to/knockout ko test/
+# - Testing another implementation: KO_UNDER_TEST=/path/to/knockout ko -d test
 #
 # Turbo testsuites:
 # - Files named "*.turbo.suite.sh" are bash fn-suites that are listed like any
@@ -216,7 +222,7 @@ FN_SUITE
 }
 
 usage() {
-  printf 'usage: %s [-v] [-d] [<file-or-dir>...]\n' "${0##*/}" >&2
+  printf 'usage: %s [run] [-v] [-k] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
   printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout fn-suite)\n' "${0##*/}" >&2
   exit 1
 }
@@ -751,30 +757,58 @@ run_paths() {
   phase_R
 }
 
-main() {
-  if [[ "${1:-}" == fn-suite ]]; then
-    print_fn_suite
-    exit 0
-  fi
+TEST_DIRS=()
+OPT_SHIFT=0
 
-  local opt
-  while getopts ":vd" opt; do
+# Parse -v -k -d <dir>; sets OPT_SHIFT to the number of consumed arguments.
+parse_options() {
+  local opt OPTIND=1
+  while getopts ":vkd:" opt; do
     case "$opt" in
       v) V_PASS=1 ;;
-      d) KEEP_TMP=1 ;;
+      k) KEEP_TMP=1 ;;
+      d) TEST_DIRS+=("$OPTARG") ;;
       *) usage ;;
     esac
   done
-  shift $((OPTIND - 1))
+  OPT_SHIFT=$((OPTIND - 1))
+}
 
-  if [[ "$#" -eq 0 ]]; then
-    local -a project_dirs
-    mapfile -t project_dirs < <(discover_test_dirs)
-    if [[ "${#project_dirs[@]}" -eq 0 ]]; then
+main() {
+  parse_options "$@"
+  shift "$OPT_SHIFT"
+
+  local cmd="${1:-run}"
+  [[ "$#" -eq 0 ]] || shift
+  case "$cmd" in
+    fn-suite)
+      [[ "$#" -eq 0 ]] || usage
+      print_fn_suite
+      exit 0
+      ;;
+    run) ;;
+    *)
+      printf 'unknown command: %s\n' "$cmd" >&2
+      usage
+      ;;
+  esac
+
+  parse_options "$@"
+  shift "$OPT_SHIFT"
+  [[ "$#" -eq 0 ]] || { printf 'unexpected argument: %s\n' "$1" >&2; usage; }
+
+  local d
+  if [[ "${#TEST_DIRS[@]}" -eq 0 ]]; then
+    mapfile -t TEST_DIRS < <(discover_test_dirs)
+    if [[ "${#TEST_DIRS[@]}" -eq 0 ]]; then
       printf 'no test dirs found (knockout-tests/ or .knockout-tests) below %s\n' "$PWD" >&2
       usage
     fi
-    set -- "${project_dirs[@]}"
+  else
+    for d in "${TEST_DIRS[@]}"; do
+      [[ -e "$d" ]] || die "path not found: $d"
+      [[ -d "$d" ]] || die "expected directory, got file: $d"
+    done
   fi
 
   # Tests calling `knockout fn-suite` get this same knockout, installed or not.
@@ -782,7 +816,7 @@ main() {
   export PATH
 
   init_run
-  run_paths "$@"
+  run_paths "${TEST_DIRS[@]}"
 
   if [[ "$had_test_error" -ne 0 ]]; then
     exit 1

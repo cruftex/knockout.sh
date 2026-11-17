@@ -21,8 +21,9 @@ follow them unless the user decides otherwise.
   suite is a failure with a hint, not silently detected.
 - **One self-contained file.** `bin/knockout` has no library files and no install location. Anything
   that suites need is emitted by knockout itself (`knockout fn-suite`).
-- **Few subcommand words.** Positional arguments are paths. Every subcommand (today only `fn-suite`)
-  is a name a test file could collide with, so add new ones only with a strong reason.
+- **Positional arguments are commands** (`run`, the default, and `fn-suite`); anything else is an
+  error. Tests are selected by directory (`-d <dir>`, repeatable) or by discovery. A single test is
+  run by calling it directly, never through `ko`.
 
 ## Conventions
 
@@ -33,7 +34,8 @@ follow them unless the user decides otherwise.
 | Bash suite | `source <(knockout fn-suite)`, `t_*` functions, last line `testsuite_main "$@"` |
 | Test description | first stdout line starting with `# ` |
 | Test directories | a `knockout-tests/` dir, or an empty `.knockout-tests` marker in any dir |
-| Bare `ko` | runs all test dirs below the cwd (hidden dirs skipped, sorted) |
+| `ko` = `ko run` | runs all test dirs below the cwd (hidden dirs skipped, sorted) |
+| `ko -d <dir>` | runs only the given dir(s), non-recursive; `-v` pass-through, `-k` keep tmpdir |
 
 ## Shell rules (from the prompt, project wide)
 
@@ -70,13 +72,16 @@ follow them unless the user decides otherwise.
   - `test/knockout-test.sh`: a second, independent run of the same `t_*` functions. It stubs
     `knockout` and `testsuite_main` as no-ops, so no knockout code acts as harness.
 - **Implementation under test:** by default the knockout that runs the suite. Test another one with
-  `KO_UNDER_TEST=/path/to/knockout ko test/`. The copy must be named `knockout`.
+  `KO_UNDER_TEST=/path/to/knockout ko -d test`. The copy must be named `knockout`.
 - **Every case cleans up after itself:** use `case_dir NAME; d="$CASE_DIR"`. Never use
   `d="$(case_dir …)"`, because the subshell would remove the dir immediately.
 - **Never run the complete script without arguments from the repo.** It would find the repo's own
   tests and recurse. `cd` into an empty case dir first.
-- **Fixtures:** build bash suites with `write_fn_suite` (it embeds `print_fn_suite`, no knockout
-  process). Only the integration test covers `source <(knockout fn-suite)`.
+- **Fixture suites:** when a test needs a throwaway bash suite as test data, create it with
+  `write_fn_suite PATH <<'BODY' … BODY`. It pastes the fn-suite handler into the file (from
+  `print_fn_suite` of the sourced knockout) instead of writing `source <(knockout fn-suite)`, which
+  would start a knockout process on every listing and case. The real `source <(knockout fn-suite)`
+  line is covered once, by `t_int_fn_suite_sourced_by_suite_without_install`; keep that test using it.
 - **Prove that a new test can fail** (break the code in a scratch copy, not in the repo), and check
   that no `ko-test.*` dirs are left behind.
 - **Done means:** `env PATH=/usr/bin:/bin make test` passes, which proves it works with no knockout

@@ -14,20 +14,22 @@ generator* and emit a list of further test invocations.
 ## Usage
 
 ```bash
-ko                    # run the project's tests (see below)
-knockout [-v] [-d] [<file-or-dir>...]
+ko                          # = ko run: run the project's tests
+knockout [run] [-v] [-k] [-d <dir>]...
+knockout fn-suite           # print the bash t_* suite handler
 ```
 
-- Without file/dir arguments, knockout runs every test directory found
-  recursively below the current directory: directories named
-  `knockout-tests/`, and directories containing an empty marker file
-  `.knockout-tests` (e.g. `test/.knockout-tests`). Hidden directories are
-  skipped.
-- Arguments are files or directories. Directories expand to the files they
-  contain (non-recursive).
+- A positional argument is always a command: `run` (the default) or
+  `fn-suite`. To run a single test, call it directly.
+- Without `-d`, knockout runs every test directory found recursively below
+  the current directory: directories named `knockout-tests/`, and
+  directories containing an empty marker file `.knockout-tests`
+  (e.g. `test/.knockout-tests`). Hidden directories are skipped.
+- `-d <dir>` runs only the given directory (repeatable). Directories expand
+  to the files they contain (non-recursive).
 - Executable files run directly. Non-executable `*.sh` files run via `bash`.
   Anything else is a fatal error.
-- `-v` passes test stdout through. `-d` keeps the `.out`/`.err`/`.status`
+- `-v` passes test stdout through. `-k` keeps the `.out`/`.err`/`.status`
   files of each test for inspection.
 - If the first stdout line starts with `# `, it is shown as the test
   description.

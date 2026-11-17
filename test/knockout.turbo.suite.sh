@@ -4,7 +4,7 @@
 # time independently via test/knockout-test.sh, or one case:
 #   test/knockout.turbo.suite.sh <name>
 # Tests another implementation with the normal knockout as harness:
-#   KO_UNDER_TEST=/path/to/other ko test/
+#   KO_UNDER_TEST=/path/to/other ko -d test
 set -euo pipefail
 source <(knockout fn-suite)
 
@@ -150,7 +150,7 @@ t_int_usage_without_args() {
   assert_eq "1" "$KO_RC" "usage should exit 1" || return
   assert_file_empty "$out" || return
   assert_contains "$err" "no test dirs found" || return
-  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [-v] [-d] [<file-or-dir>...]" || return
+  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [run] [-v] [-k] [-d <dir>]..." || return
 }
 
 t_unit_executable_success_and_description() {
@@ -292,11 +292,12 @@ SCRIPT
   assert_not_contains "$out" "$nested" || return
 }
 
-t_int_options_v_and_d() {
-  echo "# -v passes stdout through, -d keeps stdout/stderr/status artifacts"
+t_int_options_v_k_d() {
+  echo "# -d selects a test dir, -v passes stdout through, -k keeps artifacts"
   local d t out err kept
   case_dir options; d="$CASE_DIR"
-  t="$d/pass"
+  mkdir -p "$d/tests"
+  t="$d/tests/pass"
   out="$d/out"
   err="$d/err"
 
@@ -307,8 +308,9 @@ printf 'visible stdout\n'
 SCRIPT
   make_executable "$t"
 
-  run_ko "$out" "$err" -v -d "$t"
-  assert_eq "0" "$KO_RC" "-v -d run should pass" || return
+  run_ko "$out" "$err" -v -k -d "$d/tests"
+  assert_eq "0" "$KO_RC" "-v -k -d run should pass" || return
+  assert_contains "$out" "[T 1/1] $t" || return
   assert_contains "$out" "visible stdout" || return
   assert_contains "$out" "-- kept artifacts" || return
   kept="$(sed -n 's/^keeping tmpdir: //p' "$err" | tail -n 1)"
@@ -427,7 +429,8 @@ t_int_fn_suite_sourced_by_suite_without_install() {
   case_dir fn-suite-source; dir="$CASE_DIR"
   out="$dir/out"
   err="$dir/err"
-  suite="$dir/x.suite.sh"
+  mkdir -p "$dir/tests"
+  suite="$dir/tests/x.suite.sh"
 
   cat >"$suite" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -441,7 +444,7 @@ SCRIPT
   make_executable "$suite"
 
   # Minimal PATH without any installed knockout: runner must provide itself.
-  PATH="/usr/bin:/bin" run_unit "$out" "$err" "$suite"
+  PATH="/usr/bin:/bin" run_ko "$out" "$err" -d "$dir/tests"
   assert_eq "0" "$KO_RC" "suite sourcing fn-suite should pass" || return
   assert_file_empty "$err" || return
   assert_contains "$out" "[S 3/3]" || return
@@ -649,6 +652,34 @@ BODY
   assert_contains "$d/out" "[S 4/4]" || return
 }
 
+t_int_commands() {
+  echo "# ko equals ko run; a file argument is an unknown command; -d needs a dir"
+  local d here
+  case_dir commands; d="$CASE_DIR"
+  mkdir -p "$d/proj/knockout-tests"
+  printf 'echo "# a"\n' >"$d/proj/knockout-tests/a.sh"
+
+  here="$PWD"
+  cd "$d/proj"
+  run_ko "$d/bare.out" "$d/bare.err"
+  local bare_rc="$KO_RC"
+  run_ko "$d/run.out" "$d/run.err" run
+  local run_rc="$KO_RC"
+  run_ko "$d/file.out" "$d/file.err" knockout-tests/a.sh
+  local file_rc="$KO_RC"
+  run_ko "$d/missing.out" "$d/missing.err" -d nope
+  local missing_rc="$KO_RC"
+  cd "$here"
+
+  assert_eq "0 0" "$bare_rc $run_rc" "ko and ko run should pass" || return
+  assert_eq "$(normalize_run "$d/bare.out")" "$(normalize_run "$d/run.out")" "ko and ko run should match" || return
+  assert_eq "1" "$file_rc" "file argument should fail" || return
+  assert_contains "$d/file.err" "unknown command: knockout-tests/a.sh" || return
+  assert_contains "$d/file.err" "usage:" || return
+  assert_eq "1" "$missing_rc" "missing -d dir should fail" || return
+  assert_contains "$d/missing.err" "die: path not found: nope" || return
+}
+
 # --- unit tests of single functions ---
 
 t_unit_name_classification() {
@@ -772,6 +803,38 @@ t_int_sourcing_runs_nothing() {
     || { fail_msg "sourcing failed or run_paths missing"; return 1; }
   assert_file_empty "$d/out" || return
   assert_file_empty "$d/err" || return
+}
+
+t_unit_elapsed_secs() {
+  echo "# elapsed_secs computes seconds from EPOCHREALTIME values"
+  local v
+  elapsed_secs 100.000000 100.000000 v; assert_eq "0.000" "$v" "zero" || return
+  elapsed_secs 100.000000 101.000000 v; assert_eq "1.000" "$v" "whole second" || return
+  elapsed_secs 100.000000 100.012999 v; assert_eq "0.012" "$v" "truncates to ms" || return
+  elapsed_secs 100.999500 101.000400 v; assert_eq "0.000" "$v" "carry across decimal point" || return
+  elapsed_secs 100.900000 102.150000 v; assert_eq "1.250" "$v" "seconds and ms" || return
+  elapsed_secs 100,000000 100,250000 v; assert_eq "0.250" "$v" "comma decimal separator" || return
+}
+
+t_unit_elapsed_time_is_plausible() {
+  echo "# reported times match a 0.1s sleep (forked and turbo)"
+  local d t
+  case_dir plausible-time; d="$CASE_DIR"
+  printf 'sleep 0.1\n' >"$d/slow.sh"
+  write_fn_suite "$d/slow.turbo.suite.sh" <<'BODY'
+t_nap() { sleep 0.1; }
+BODY
+
+  run_unit "$d/out" "$d/err" "$d/slow.sh" "$d/slow.turbo.suite.sh"
+  assert_eq "0" "$KO_RC" "slow tests should pass" || return
+  for t in "$d/slow.sh" "$d/slow.turbo.suite.sh::nap"; do
+    local secs
+    secs="$(sed -nE "s#^\[[TS] [0-9]+/[0-9]+\] ${t//./\\.}  ([0-9]+\.[0-9]{3})s.*#\1#p" "$d/out")"
+    [[ -n "$secs" ]] || { fail_msg "no progress line for $t"; sed 's/^/      | /' "$d/out" >&2; return 1; }
+    # 0.100 <= secs < 0.300, compared in ms
+    local ms=$(( 10#${secs/./} ))
+    (( ms >= 100 && ms < 300 )) || { fail_msg "implausible time for $t: ${secs}s"; return 1; }
+  done
 }
 
 testsuite_main "$@"
