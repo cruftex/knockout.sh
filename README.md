@@ -20,8 +20,11 @@ A test is any runnable program: an executable file in any language, or a
 non-executable `*.sh` file (run via `bash`).
 
 - It **passes** when it exits with status 0 **and** writes nothing to stderr.
-- Anything else **fails**: a non-zero exit status, or any stderr output, even
-  with status 0. knockout then prints the test's stdout, stderr and status.
+- It is **skipped** when it exits with status 77 and writes nothing to stderr
+  (the automake/meson convention). A skip doesn't fail the run; the progress
+  line shows `SKIP`.
+- Anything else **fails**: another non-zero exit status, or any stderr output,
+  even with status 0. knockout then prints the test's stdout, stderr and status.
 - Stdout is free for logging; it is captured and shown on failure (or always
   with `-v`). If the first stdout line starts with `# `, the rest of that line
   is shown as the test description.
@@ -87,7 +90,9 @@ To run many cases in one process in any language, use a
 - Tests run in the caller's current directory; knockout does not `cd`. Resolve
   paths from the test file, e.g. `here="$(dirname "$0")"`.
 - Any stderr output fails a test. Redirect expected noise (`2>/dev/null`), or
-  capture it and check it.
+  capture it and check it. (Python unittest tests are the exception, see
+  [below](#example-python-unittest).)
+- To skip a test, e.g. when a tool is missing, print the reason and `exit 77`.
 - Let a failing check exit non-zero and say on stderr what went wrong.
 - Naming is strict: suites are named `*.suite` or `*.suite.*`; plain tests must
   not be.
@@ -96,7 +101,7 @@ To run many cases in one process in any language, use a
 
 ```bash
 ko                          # = ko run: run the project's tests
-knockout [run] [-v] [-k] [-d <dir>]...
+knockout [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...
 knockout fn-suite           # print the bash t_* suite handler
 knockout python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite
 ```
@@ -113,6 +118,8 @@ knockout python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unit
   Anything else is a fatal error.
 - `-v` passes test stdout through. `-k` keeps the `.out`/`.err`/`.status`
   files of each test for inspection.
+- `-t <file>` writes a TAP version 13 report, `-j <file>` a JUnit XML report
+  (for CI). JUnit includes stdout/stderr of failed and skipped tests.
 
 Progress output:
 
@@ -120,7 +127,13 @@ Progress output:
 [L 1/1] examples/example.suite.sh  0.015s
 [T 1/4] test/knockout-test.sh  0.833s
 [S 2/4] examples/example.suite.sh::another  0.010s  -- another example test
+[S 3/4] examples/example.suite.sh::later  0.009s  SKIP  -- not ready yet
+4 tests: 3 passed, 0 failed, 1 skipped, 0 not run, 0 suite errors  0.921s
 ```
+
+The last line is the summary. *Not run* counts tests of a suite that failed as
+a whole; *suite errors* count such suite failures (a broken listing, or a worker
+that fails to start or breaks the protocol).
 
 ## Testsuite protocol
 
@@ -235,10 +248,20 @@ its own case:
 [S 1/3] examples/python/knockout-tests/unittest.worker.suite.sh::tests.test_calc.CalcTest.test_add  0.004s  -- adds two numbers
 ```
 
+> **stderr does not fail a Python test.** Unlike knockout's own rule (any
+> stderr output is a failure), unittest decides pass or fail, exactly as with
+> `python3 -m unittest`. Logging and warnings don't break tests: a test's stdout
+> and stderr both end up in its stdout (`.out`), and `.err` only gets the
+> failures.
+
 The worker imports the tests once and forks per test, so each test is isolated
-without re-importing. A test's docstring becomes its description, skips are
-noted on stdout, and a failure shows the traceback in the error report. To run
-one test, call the suite file with its id:
+without re-importing. Each test runs with its class and module fixtures
+(`setUpClass`, `setUpModule`), so these run once per test. A test's docstring
+becomes its description. A failure shows `FAIL: <test>` or `ERROR: <test>` with
+the traceback, including the parameters of a failed subtest. A skipped test is
+`SKIP` (exit 77, with `skipped: <reason>` on stdout), and an expected failure
+passes with `expected failure` on stdout. To run one test, call the suite file
+with its id:
 `bash examples/python/knockout-tests/unittest.worker.suite.sh tests.test_calc.CalcTest.test_add`.
 
 With 500 trivial unittest cases, the run took 1.5s as a worker suite and 47s

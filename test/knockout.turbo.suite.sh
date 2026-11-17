@@ -150,7 +150,7 @@ t_int_usage_without_args() {
   assert_eq "1" "$KO_RC" "usage should exit 1" || return
   assert_file_empty "$out" || return
   assert_contains "$err" "no test dirs found" || return
-  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [run] [-v] [-k] [-d <dir>]..." || return
+  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]..." || return
 }
 
 t_unit_executable_success_and_description() {
@@ -293,7 +293,7 @@ SCRIPT
 }
 
 t_int_options_v_k_d() {
-  echo "# -d selects a test dir, -v passes stdout through, -k keeps artifacts"
+  echo "# -d selects a test dir, -v passes stdout through, -k keeps artifacts, -t/-j write reports"
   local d t out err kept
   case_dir options; d="$CASE_DIR"
   mkdir -p "$d/tests"
@@ -308,9 +308,12 @@ printf 'visible stdout\n'
 SCRIPT
   make_executable "$t"
 
-  run_ko "$out" "$err" -v -k -d "$d/tests"
-  assert_eq "0" "$KO_RC" "-v -k -d run should pass" || return
+  run_ko "$out" "$err" -v -k -t "$d/r.tap" -j "$d/r.xml" -d "$d/tests"
+  assert_eq "0" "$KO_RC" "-v -k -t -j -d run should pass" || return
   assert_contains "$out" "[T 1/1] $t" || return
+  assert_contains "$out" "1 tests: 1 passed, 0 failed, 0 skipped, 0 not run, 0 suite errors  " || return
+  assert_contains "$d/r.tap" "ok 1 - $t" || return
+  assert_contains "$d/r.xml" "<testcase classname=\"$t\"" || return
   assert_contains "$out" "visible stdout" || return
   assert_contains "$out" "-- kept artifacts" || return
   kept="$(sed -n 's/^keeping tmpdir: //p' "$err" | tail -n 1)"
@@ -796,12 +799,23 @@ t_unit_python3_unittest_worker() {
   printf 'def twice(x):\n    return 2 * x\n' >"$d/proj/mod.py"
   : >"$d/proj/tests/__init__.py"
   cat >"$d/proj/tests/test_mod.py" <<'PYTEST'
+import logging
+import sys
 import unittest
 
 import mod
 
 
+def setUpModule():
+    global MODULE_READY
+    MODULE_READY = True
+
+
 class ModTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.class_ready = True
+
     def test_a_pass(self):
         """twice doubles"""
         self.assertEqual(mod.twice(2), 4)
@@ -812,6 +826,22 @@ class ModTest(unittest.TestCase):
     @unittest.skip("not now")
     def test_c_skip(self):
         pass
+
+    def test_d_fixtures(self):
+        self.assertTrue(self.class_ready and MODULE_READY)
+
+    def test_e_stderr(self):
+        logging.warning("a logged warning")
+        print("plain stderr", file=sys.stderr)
+
+    def test_f_subtest(self):
+        for i in range(3):
+            with self.subTest(i=i):
+                self.assertNotEqual(i, 1)
+
+    @unittest.expectedFailure
+    def test_g_xfail(self):
+        self.fail()
 PYTEST
   printf '%s\n' 'cd "$(dirname "$0")/.." && exec knockout python3-unittest discover -s tests -t . "$@"' \
     >"$d/proj/knockout-tests/u.worker.suite.sh"
@@ -819,14 +849,132 @@ PYTEST
   run_unit "$d/out" "$d/err" "$d/proj/knockout-tests"
   s="$d/proj/knockout-tests/u.worker.suite.sh::tests.test_mod.ModTest"
   assert_eq "1" "$KO_RC" "failing unittest should fail the run" || return
-  assert_contains "$d/out" "[S 1/3] ${s}.test_a_pass" || return
+  assert_contains "$d/out" "[S 1/7] ${s}.test_a_pass" || return
   assert_contains "$d/out" "-- twice doubles" || return
-  assert_contains "$d/out" "[S 3/3] ${s}.test_c_skip" || return
+  assert_contains "$d/out" "[S 3/7] ${s}.test_c_skip  " || return
+  assert_line_count_regex "$d/out" '::tests\.test_mod\.ModTest\.test_c_skip  [0-9.]+s  SKIP$' 1 || return
   assert_contains "$d/err" "test: ${s}.test_b_fail" || return
   assert_contains "$d/err" "AssertionError: 4 != 5" || return
-  assert_not_contains "$d/err" "test_a_pass" || return
-  assert_not_contains "$d/err" "test_c_skip" || return
+  assert_contains "$d/err" "FAIL: test_f_subtest (tests.test_mod.ModTest.test_f_subtest) (i=1)" || return
+  # Exactly the two real failures: fixtures ran, stderr output and xfail don't fail.
+  assert_line_count_regex "$d/err" '^test: ' 2 || return
   assert_eq "" "$(find "$d/proj" -name __pycache__)" "no bytecode should be written" || return
+}
+
+t_unit_skip_exit_77() {
+  echo "# exit 77 without stderr is SKIP (plain, suite, turbo); with stderr it fails"
+  local d f
+  case_dir skip77; d="$CASE_DIR"
+  printf 'echo "# plain skip"; exit 77\n' >"$d/a.sh"
+  for f in "$d/s.suite.sh" "$d/s.turbo.suite.sh"; do
+    write_fn_suite "$f" <<'BODY'
+t_skipped() { echo "# case skip"; exit 77; }
+t_ok() { echo "# ok"; }
+BODY
+  done
+
+  run_unit "$d/out" "$d/err" "$d/a.sh" "$d/s.suite.sh" "$d/s.turbo.suite.sh"
+  assert_eq "0" "$KO_RC" "skipped tests should not fail the run" || return
+  assert_file_empty "$d/err" || return
+  assert_contains "$d/out" "$d/a.sh  " || return
+  assert_line_count_regex "$d/out" '  [0-9.]+s  SKIP  -- (plain|case) skip$' 3 || return
+  assert_line_count_regex "$d/out" 'SKIP' 3 || return
+
+  printf 'echo "# noisy"; echo oops >&2; exit 77\n' >"$d/b.sh"
+  run_unit "$d/out2" "$d/err2" "$d/b.sh"
+  assert_eq "1" "$KO_RC" "exit 77 with stderr should fail" || return
+  assert_not_contains "$d/out2" "SKIP" || return
+  assert_contains "$d/err2" "status: 77" || return
+}
+
+# Like run_unit, plus finish_run (summary line) and TAP/JUnit reports
+# written to $CASE_DIR/r.tap and $CASE_DIR/r.xml.
+run_unit_reports() {
+  local out_file="$1"
+  local err_file="$2"
+  shift 2
+  local kt
+  kt="$(mktemp -d "$CASE_ROOT/run.XXXXXX")"
+
+  set +e
+  (
+    set -euo pipefail
+    PATH="$(dirname "$KO_UNDER_TEST"):$PATH"
+    TAP_FILE="$CASE_DIR/r.tap"
+    JUNIT_FILE="$CASE_DIR/r.xml"
+    init_run "$kt"
+    run_paths "$@"
+    finish_run
+    [[ "$had_test_error" -eq 0 ]]
+  ) >"$out_file" 2>"$err_file" </dev/null
+  KO_RC=$?
+  set -e
+}
+
+# Mixed fixture in dir $1 (created): pass, fail (with XML special chars), skip, a "#" in a
+# name, and a worker suite whose setup fails (suite error, 2 tests not run).
+write_mixed_results() {
+  mkdir -p "$1"
+  printf 'echo "# passes"\n' >"$1/a-pass.sh"
+  printf '%s\n' 'echo "out <&\"> x"; echo "err <&\"> y" >&2; exit 3' >"$1/b-fail.sh"
+  printf 'echo "# skips"; exit 77\n' >"$1/c-skip.sh"
+  printf 'exit 0\n' >"$1/d-hash#name.sh"
+  write_fn_suite "$1/e.worker.suite.sh" <<'BODY'
+t_one() { :; }
+t_two() { :; }
+[[ -z "${KNOCKOUT_WORKER:-}" ]] || exit 4
+BODY
+}
+
+t_unit_summary_line() {
+  echo "# summary line counts passed, failed, skipped, not run and suite errors"
+  local d
+  case_dir summary; d="$CASE_DIR"
+  write_mixed_results "$d/t"
+
+  run_unit_reports "$d/out" "$d/err" "$d/t"
+  assert_eq "1" "$KO_RC" "mixed results should fail the run" || return
+  assert_line_count_regex "$d/out" \
+    '^6 tests: 2 passed, 1 failed, 1 skipped, 2 not run, 1 suite errors  [0-9]+\.[0-9]{3}s$' 1 || return
+  assert_eq "6 tests:" "$(tail -n 1 "$d/out" | cut -d' ' -f1-2)" "summary should be the last stdout line" || return
+}
+
+t_unit_tap_report() {
+  echo "# -t writes a TAP report"
+  local d
+  case_dir tap; d="$CASE_DIR"
+  write_mixed_results "$d/t"
+
+  run_unit_reports "$d/out" "$d/err" "$d/t"
+  assert_eq "TAP version 13" "$(head -n 1 "$d/r.tap")" "TAP header" || return
+  assert_eq "1..7" "$(tail -n 1 "$d/r.tap")" "TAP plan line at the end" || return
+  # Files of a dir run in directory order: match entries, not their numbers.
+  assert_line_count_regex "$d/r.tap" "^ok [0-9] - $d/t/a-pass\\.sh\$" 1 || return
+  assert_line_count_regex "$d/r.tap" "^not ok [0-9] - $d/t/b-fail\\.sh\$" 1 || return
+  assert_line_count_regex "$d/r.tap" "^ok [0-9] - $d/t/c-skip\\.sh # SKIP\$" 1 || return
+  assert_line_count_regex "$d/r.tap" "^ok [0-9] - $d/t/d-hash\\\\#name\\.sh\$" 1 || return
+  assert_line_count_regex "$d/r.tap" "^not ok [0-9] - $d/t/e\\.worker\\.suite\\.sh\$" 1 || return
+  assert_line_count_regex "$d/r.tap" "^not ok [0-9] - $d/t/e\\.worker\\.suite\\.sh::two\$" 1 || return
+  assert_line_count_regex "$d/r.tap" '^# notrun, status 4$' 2 || return
+  assert_line_count_regex "$d/r.tap" '^(not )?ok [1-7] - ' 7 || return
+}
+
+t_unit_junit_report() {
+  echo "# -j writes a valid JUnit XML report"
+  local d
+  case_dir junit; d="$CASE_DIR"
+  write_mixed_results "$d/t"
+
+  run_unit_reports "$d/out" "$d/err" "$d/t"
+  python3 -c 'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])' "$d/r.xml" \
+    || { fail_msg "invalid XML: $d/r.xml"; return 1; }
+  assert_contains "$d/r.xml" '<testsuite name="knockout" tests="7" failures="1" errors="3" skipped="1" time="' || return
+  assert_contains "$d/r.xml" "<testcase classname=\"$d/t/a-pass.sh\" name=\"$d/t/a-pass.sh\" time=\"" || return
+  assert_contains "$d/r.xml" '<failure message="exit status 3">err &lt;&amp;&quot;&gt; y' || return
+  assert_contains "$d/r.xml" '<system-out>out &lt;&amp;&quot;&gt; x' || return
+  assert_contains "$d/r.xml" '<skipped/>' || return
+  assert_contains "$d/r.xml" "<testcase classname=\"$d/t/e.worker.suite.sh\" name=\"two\"" || return
+  assert_contains "$d/r.xml" '<error message="notrun, status 4"/>' || return
 }
 
 t_unit_suite_cases_get_empty_stdin() {

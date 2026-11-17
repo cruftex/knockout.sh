@@ -30,6 +30,8 @@ set -euo pipefail
 # - Exit status 0 means success.
 # - Any non-zero exit status means failure.
 # - Any output on stderr means failure.
+# - Exit status 77 with no stderr output means skipped: shown as SKIP, counted as
+#   skipped, and not a failure. This holds for testsuite and worker cases too.
 # - Standard output and standard error and exit status are collected in temporary
 #   files named after test designations
 # - Standard output, standard error, and exit status are written to separate
@@ -63,7 +65,7 @@ set -euo pipefail
 #   [S 2/3] ./test_math.suite::add (1 2)  0.000s
 #   [S 3/3] ./test_math.suite::div (4 2)  0.000s  -- division works
 #
-# - Format: [PHASE CURRENT/TOTAL] DESIGNATION  TIME [-- DESCRIPTION]
+# - Format: [PHASE CURRENT/TOTAL] DESIGNATION  TIME [SKIP] [-- DESCRIPTION]
 # - TIME is seconds with up to 3 decimals, unit immediately appended (e.g. 12.345s).
 # - DESIGNATION = filename + optional test name + remaining arguments
 #   (test name is not repeated inside arguments)
@@ -74,11 +76,21 @@ set -euo pipefail
 #     * print "ERROR" and full stdout/stderr/status to stderr
 #     * continue running remaining tests
 # - Final exit status is non-zero if any test failed.
+# - After all tests, print one summary line to stdout:
+#     51 tests: 48 passed, 1 failed, 1 skipped, 1 not run, 0 suite errors  12.345s
+#   (all fields always present). Suite errors are failures of a suite file itself
+#   (listing, worker setup or worker protocol).
 #
 # Optional parameters:
 # - -v : pass test stdout/stderr through in addition to capturing
 # - -k : keep temporary directory after execution
 # - -d <dir> : test directory to run (repeatable); disables project mode
+# - -t <file> : write a TAP version 13 report (ok/not ok per test, "# SKIP",
+#   suite errors as "not ok", plan line "1..N" at the end)
+# - -j <file> : write a JUnit XML report: one <testsuite name="knockout">, one
+#   <testcase classname="FILE" name="TEST AND ARGS" time="..."> per test, with
+#   <failure> (status and stderr), <error> (not run / suite error, with hint) or
+#   <skipped/>, and <system-out>/<system-err> for failed and skipped tests.
 #
 # Project mode (run without -d):
 # - Run all test directories found recursively below the current directory:
@@ -140,8 +152,15 @@ set -euo pipefail
 # - Without TEST_ID and KNOCKOUT_WORKER: list the unittest test ids (exit 88).
 #   With TEST_ID: run that one test. With KNOCKOUT_WORKER=1: worker protocol;
 #   tests are imported once, each test runs in a forked child.
-# - Per test: the first docstring line is printed as "# " description, skips are
-#   noted on stdout, failures and errors write the traceback to stderr and exit 1.
+# - Unlike the knockout convention ("any output on stderr means failure"), stderr
+#   output of a Python test does NOT fail it: pass/fail is decided by unittest,
+#   as with "python3 -m unittest", so logging and warnings don't break tests.
+# - Per test: the test runs inside a TestSuite, so class and module fixtures
+#   run. The first docstring line is printed as "# " description. The test's own
+#   stdout and stderr both go to stdout; .err only gets failures and errors, each
+#   as "FAIL: <test>" or "ERROR: <test>" (including subtest parameters) plus the
+#   traceback (exit 1). Skipped: "skipped: <reason>" on stdout, exit 77.
+#   Expected failure: "expected failure" on stdout, exit 0.
 # - Usage in a worker testsuite file (e.g. knockout-tests/unittest.worker.suite.sh):
 #     cd "$(dirname "$0")/.." && exec knockout python3-unittest discover -s tests -t . "$@"
 #
@@ -299,22 +318,30 @@ def discover(start, top):
     return tests
 
 
-def run_test(test):
-    """Runs one test with output on fd 1/2; returns the exit status."""
+def run_test(test, report):
+    """Runs one test; failure blocks go to report. Returns the exit status:
+    0 passed, 1 failed, 77 skipped."""
     doc = test.shortDescription()
     if doc:
-        print("# " + doc)
+        print("# " + doc, flush=True)
     result = unittest.TestResult()
-    test.run(result)
-    for _, reason in result.skipped:
-        print("skipped: " + reason)
-    for _, trace in result.errors + result.failures:
-        sys.stderr.write(trace)
-    if result.unexpectedSuccesses:
-        sys.stderr.write("unexpected success\n")
+    unittest.TestSuite([test]).run(result)
     sys.stdout.flush()
     sys.stderr.flush()
-    return 0 if result.wasSuccessful() else 1
+    for _, reason in result.skipped:
+        print("skipped: " + reason)
+    for _ in result.expectedFailures:
+        print("expected failure")
+    for kind, entries in (("ERROR", result.errors), ("FAIL", result.failures)):
+        for failed, trace in entries:
+            report.write("%s: %s\n%s" % (kind, failed, trace))
+    for passed in result.unexpectedSuccesses:
+        report.write("FAIL: %s\nunexpected success\n" % passed)
+    sys.stdout.flush()
+    report.flush()
+    if not result.wasSuccessful():
+        return 1
+    return 77 if result.skipped else 0
 
 
 def worker(tests):
@@ -326,15 +353,20 @@ def worker(tests):
         if pid == 0:
             status = 1
             try:
+                # The test's stdout and stderr both go to .out; .err only gets
+                # failure blocks, so stderr output alone doesn't fail a test.
                 os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
                 flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
                 os.dup2(os.open(prefix + ".out", flags, 0o644), 1)
-                os.dup2(os.open(prefix + ".err", flags, 0o644), 2)
+                os.dup2(1, 2)
+                sys.stdout.reconfigure(line_buffering=True)
+                report = os.fdopen(os.open(prefix + ".err", flags, 0o644), "w")
                 test = tests.get(test_id)
                 if test is None:
-                    sys.stderr.write("no such test: %s\n" % test_id)
+                    report.write("no such test: %s\n" % test_id)
+                    report.flush()
                 else:
-                    status = run_test(test)
+                    status = run_test(test, report)
             finally:
                 os._exit(status)
         status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
@@ -357,7 +389,7 @@ def main():
             print(name)
         sys.exit(88)
     elif test_id in tests:
-        sys.exit(run_test(tests[test_id]))
+        sys.exit(run_test(tests[test_id], sys.stderr))
     else:
         sys.exit("no such test: " + test_id)
 
@@ -367,7 +399,7 @@ PYTHON3_UNITTEST
 }
 
 usage() {
-  printf 'usage: %s [run] [-v] [-k] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
+  printf 'usage: %s [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
   printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout fn-suite)\n' "${0##*/}" >&2
   printf '       %s python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite\n' "${0##*/}" >&2
   exit 1
@@ -407,6 +439,15 @@ init_run() {
   TOTAL_TESTS=0
   RUN_IDX=0
   SUITE_LINES_FILE=()
+  COUNT_PASS=0 COUNT_FAIL=0 COUNT_SKIP=0 COUNT_NOTRUN=0 COUNT_SUITEERR=0
+  REPORT_N=0
+  RUN_T0="$EPOCHREALTIME"
+  if [[ -n "$TAP_FILE" ]]; then
+    printf 'TAP version 13\n' >"$TAP_FILE"
+  fi
+  if [[ -n "$JUNIT_FILE" ]]; then
+    : >"$TMPDIR/junit.cases"
+  fi
 }
 
 die() {
@@ -492,6 +533,140 @@ report_error() {
   fi
 
   had_test_error=1
+}
+
+# --- results: counters, summary, TAP and JUnit reports ---
+COUNT_PASS=0 COUNT_FAIL=0 COUNT_SKIP=0 COUNT_NOTRUN=0 COUNT_SUITEERR=0
+REPORT_N=0
+RUN_T0=""
+TAP_FILE=""
+JUNIT_FILE=""
+
+# Outcome of a finished test into variable $3: stderr output or a status other
+# than 0 and 77 is "fail", 77 is "skip", 0 is "pass". $1 status, $2 stderr file.
+classify_outcome() {
+  local __o=fail
+  if [[ ! -s "$2" ]]; then
+    case "$1" in
+      0) __o=pass ;;
+      77) __o=skip ;;
+    esac
+  fi
+  printf -v "$3" '%s' "$__o"
+}
+
+# Records one result. $1 designation, $2 outcome: pass, fail, skip, notrun,
+# notrun-quiet (not run, explained by a suite error already) or suiteerror.
+# $3 status, $4 seconds, $5 stdout file, $6 stderr file, [$7 hint].
+record_result() {
+  case "$2" in
+    pass) COUNT_PASS=$((COUNT_PASS + 1)) ;;
+    skip) COUNT_SKIP=$((COUNT_SKIP + 1)) ;;
+    fail) COUNT_FAIL=$((COUNT_FAIL + 1)); report_error "$1" "$3" "$5" "$6" "${7:-}" ;;
+    notrun) COUNT_NOTRUN=$((COUNT_NOTRUN + 1)); report_error "$1" "$3" "$5" "$6" "${7:-}" ;;
+    notrun-quiet) COUNT_NOTRUN=$((COUNT_NOTRUN + 1)) ;;
+    suiteerror) COUNT_SUITEERR=$((COUNT_SUITEERR + 1)); report_error "$1" "$3" "$5" "$6" "${7:-}" ;;
+    *) die "unknown outcome: $2" ;;
+  esac
+  REPORT_N=$((REPORT_N + 1))
+  if [[ -n "$TAP_FILE" ]]; then
+    tap_entry "$@"
+  fi
+  if [[ -n "$JUNIT_FILE" ]]; then
+    junit_entry "$@"
+  fi
+}
+
+tap_entry() {
+  local hash='\#' name
+  name="${1//[#]/"$hash"}"
+  case "$2" in
+    pass) printf 'ok %d - %s\n' "$REPORT_N" "$name" ;;
+    skip) printf 'ok %d - %s # SKIP\n' "$REPORT_N" "$name" ;;
+    *)
+      printf 'not ok %d - %s\n' "$REPORT_N" "$name"
+      printf '# %s, status %s\n' "${2%-quiet}" "$3"
+      if [[ -n "${7:-}" ]]; then
+        printf '# %s\n' "$7"
+      fi
+      ;;
+  esac >>"$TAP_FILE"
+}
+
+XML_BAD_CHARS=$'[\001-\010\013\014\016-\037]'
+
+# XML-escapes $1 into variable $2 (no subshell). Drops characters XML forbids.
+xml_escape() {
+  local __s="$1" __amp='&amp;' __lt='&lt;' __gt='&gt;' __quot='&quot;'
+  __s="${__s//&/"$__amp"}"
+  __s="${__s//</"$__lt"}"
+  __s="${__s//>/"$__gt"}"
+  __s="${__s//\"/"$__quot"}"
+  __s="${__s//$XML_BAD_CHARS/}"
+  printf -v "$2" '%s' "$__s"
+}
+
+# XML-escaped content of file $1 into variable $2.
+xml_escape_file() {
+  local __c=""
+  IFS= read -r -d '' __c <"$1" || true
+  xml_escape "$__c" "$2"
+}
+
+junit_entry() {
+  local class name time="$4" msg body sout serr
+  if [[ "$1" == *::* ]]; then
+    xml_escape "${1%%::*}" class
+    xml_escape "${1#*::}" name
+  else
+    xml_escape "$1" class
+    name="$class"
+  fi
+  [[ "$time" == [0-9]* ]] || time=0
+  {
+    printf '    <testcase classname="%s" name="%s" time="%s">\n' "$class" "$name" "$time"
+    case "$2" in
+      pass) ;;
+      skip) printf '      <skipped/>\n' ;;
+      fail)
+        xml_escape "exit status $3${7:+: $7}" msg
+        xml_escape_file "$6" body
+        printf '      <failure message="%s">%s</failure>\n' "$msg" "$body"
+        ;;
+      *)
+        xml_escape "${2%-quiet}, status $3${7:+: $7}" msg
+        printf '      <error message="%s"/>\n' "$msg"
+        ;;
+    esac
+    if [[ "$2" != pass ]]; then
+      xml_escape_file "$5" sout
+      xml_escape_file "$6" serr
+      printf '      <system-out>%s</system-out>\n' "$sout"
+      printf '      <system-err>%s</system-err>\n' "$serr"
+    fi
+    printf '    </testcase>\n'
+  } >>"$TMPDIR/junit.cases"
+}
+
+# After all tests: TAP plan line, JUnit file, summary line on stdout.
+finish_run() {
+  local secs total
+  elapsed_secs "$RUN_T0" "$EPOCHREALTIME" secs
+  total=$((COUNT_PASS + COUNT_FAIL + COUNT_SKIP + COUNT_NOTRUN))
+  if [[ -n "$TAP_FILE" ]]; then
+    printf '1..%d\n' "$REPORT_N" >>"$TAP_FILE"
+  fi
+  if [[ -n "$JUNIT_FILE" ]]; then
+    {
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n'
+      printf '  <testsuite name="knockout" tests="%d" failures="%d" errors="%d" skipped="%d" time="%s">\n' \
+        "$REPORT_N" "$COUNT_FAIL" $((COUNT_NOTRUN + COUNT_SUITEERR)) "$COUNT_SKIP" "$secs"
+      cat "$TMPDIR/junit.cases"
+      printf '  </testsuite>\n</testsuites>\n'
+    } >"$JUNIT_FILE"
+  fi
+  printf '%d tests: %d passed, %d failed, %d skipped, %d not run, %d suite errors  %ss\n' \
+    "$total" "$COUNT_PASS" "$COUNT_FAIL" "$COUNT_SKIP" "$COUNT_NOTRUN" "$COUNT_SUITEERR" "$secs"
 }
 
 # --- testsuite line parsing ---
@@ -601,15 +776,20 @@ run_once_capture() {
     extract_description_from_stdout "$out_file" RUN_DESC
   fi
 
-  print_progress "$phase" "$idx" "$total" "$designation" "$RUN_DT" "$RUN_DESC"
+  local mark=""
+  if [[ "$phase" != L && "$RUN_STATUS" -eq 77 && ! -s "$err_file" ]]; then
+    mark=SKIP
+  fi
+  print_progress "$phase" "$idx" "$total" "$designation" "$RUN_DT" "$RUN_DESC" "$mark"
 }
 
 print_progress() {
-  # $1 phase, $2 idx, $3 total, $4 designation, $5 seconds, $6 description
+  # $1 phase, $2 idx, $3 total, $4 designation, $5 seconds, $6 description, [$7 SKIP]
+  local mark="${7:+  $7}"
   if [[ -n "$6" ]]; then
-    printf '[%s %d/%d] %s  %ss  -- %s\n' "$1" "$2" "$3" "$4" "$5" "$6"
+    printf '[%s %d/%d] %s  %ss%s  -- %s\n' "$1" "$2" "$3" "$4" "$5" "$mark" "$6"
   else
-    printf '[%s %d/%d] %s  %ss\n' "$1" "$2" "$3" "$4" "$5"
+    printf '[%s %d/%d] %s  %ss%s\n' "$1" "$2" "$3" "$4" "$5" "$mark"
   fi
 }
 
@@ -679,7 +859,7 @@ phase_L() {
     status="$(<"$st")"
 
     if [[ "$status" -ne 88 ]] || ! is_testsuite_output "$out" || [[ -s "$err" ]]; then
-      report_error "$f" "$status" "$out" "$err" \
+      record_result "$f" suiteerror "$status" "$RUN_DT" "$out" "$err" \
         'testsuite listing must exit 88, start stdout with "#!testsuite" and write no stderr'
       continue
     fi
@@ -706,10 +886,12 @@ run_simple() {
   status="$(<"$st")"
 
   if [[ "$status" -eq 88 ]] && is_testsuite_output "$out"; then
-    report_error "$f" "$status" "$out" "$err" \
+    record_result "$f" fail "$status" "$RUN_DT" "$out" "$err" \
       'testsuite output from a file not named as testsuite; rename it to *.suite or *.suite.<ext>'
-  elif [[ -s "$err" || "$status" -ne 0 ]]; then
-    report_error "$f" "$status" "$out" "$err"
+  else
+    local outcome
+    classify_outcome "$status" "$err" outcome
+    record_result "$f" "$outcome" "$status" "$RUN_DT" "$out" "$err"
   fi
 }
 
@@ -758,9 +940,9 @@ run_suite() {
     local status
     status="$(<"$st")"
 
-    if [[ -s "$err" || "$status" -ne 0 ]]; then
-      report_error "$designation" "$status" "$out" "$err"
-    fi
+    local outcome
+    classify_outcome "$status" "$err" outcome
+    record_result "$designation" "$outcome" "$status" "$RUN_DT" "$out" "$err"
   done <"$suite_lines"
 }
 
@@ -863,12 +1045,12 @@ run_turbo_suite() {
   local wstatus
   wstatus="$(cat "$wst" 2>/dev/null || printf '?')"
   if [[ "$REPORT_SETUP" -eq 0 && -z "$REPORT_BAD" ]]; then
-    report_error "$suite" "$wstatus" "$src.out" "$src.err" \
+    record_result "$suite" suiteerror "$wstatus" 0 "$src.out" "$src.err" \
       "turbo suite failed while being sourced; its $((last - first + 1)) tests were not run"
-    RUN_IDX="$last"
+    report_unreported "$last" "$wstatus" "" quiet
     return 0
   elif [[ -n "$REPORT_BAD" ]]; then
-    report_error "$suite" "$wstatus" /dev/null /dev/null "unexpected worker report: $REPORT_BAD"
+    record_result "$suite" suiteerror "$wstatus" 0 /dev/null /dev/null "unexpected worker report: $REPORT_BAD"
   fi
   report_unreported "$last" "$wstatus" "turbo worker aborted before this test ran"
 }
@@ -883,7 +1065,7 @@ REPORT_BASES=()
 REPORT_SETUP=0
 REPORT_BAD=""
 read_worker_reports() {
-  local token="$1" show="$2" line got dt status out err st desc
+  local token="$1" show="$2" line got dt status out err st desc outcome mark
   REPORT_SETUP=0
   REPORT_BAD=""
   while IFS= read -r line; do
@@ -908,19 +1090,21 @@ read_worker_reports() {
       cat "$err" >&2
     fi
     extract_description_from_stdout "$out" desc
-    print_progress "S" "$RUN_IDX" "$TOTAL_TESTS" "${REPORT_DESIGNATIONS[got]}" "$dt" "$desc"
-    if [[ -s "$err" || "$status" -ne 0 ]]; then
-      report_error "${REPORT_DESIGNATIONS[got]}" "$status" "$out" "$err"
-    fi
+    classify_outcome "$status" "$err" outcome
+    mark=""
+    [[ "$outcome" != skip ]] || mark=SKIP
+    print_progress "S" "$RUN_IDX" "$TOTAL_TESTS" "${REPORT_DESIGNATIONS[got]}" "$dt" "$desc" "$mark"
+    record_result "${REPORT_DESIGNATIONS[got]}" "$outcome" "$status" "$dt" "$out" "$err"
   done
 }
 
-# Reports the cases after RUN_IDX up to $1 as not run, then sets RUN_IDX to $1.
-# $2 worker status, $3 hint.
+# Records the cases after RUN_IDX up to $1 as not run, then sets RUN_IDX to $1.
+# $2 worker status, $3 hint, [$4 "quiet": no error report per case].
 report_unreported() {
-  local last="$1" idx
+  local last="$1" idx outcome=notrun
+  [[ "${4:-}" != quiet ]] || outcome=notrun-quiet
   for (( idx = RUN_IDX + 1; idx <= last; idx++ )); do
-    report_error "${REPORT_DESIGNATIONS[idx]}" "$2" /dev/null /dev/null "$3"
+    record_result "${REPORT_DESIGNATIONS[idx]}" "$outcome" "$2" 0 /dev/null /dev/null "$3"
   done
   RUN_IDX="$last"
 }
@@ -970,14 +1154,14 @@ run_worker_suite() {
   local wstatus
   wstatus="$(cat "$wst" 2>/dev/null || printf '?')"
   if [[ -n "$REPORT_BAD" ]]; then
-    report_error "$suite" "$wstatus" /dev/null "$werr" "unexpected worker report: $REPORT_BAD"
+    record_result "$suite" suiteerror "$wstatus" 0 /dev/null "$werr" "unexpected worker report: $REPORT_BAD"
   elif [[ "$REPORT_SETUP" -eq 0 ]]; then
-    report_error "$suite" "$wstatus" /dev/null "$werr" \
+    record_result "$suite" suiteerror "$wstatus" 0 /dev/null "$werr" \
       "worker suite printed no \"#!worker\" line; its $((last - first + 1)) tests were not run"
-    RUN_IDX="$last"
+    report_unreported "$last" "$wstatus" "" quiet
     return 0
   elif [[ "$wstatus" != 0 || -s "$werr" || "$RUN_IDX" -lt "$last" ]]; then
-    report_error "$suite" "$wstatus" /dev/null "$werr" \
+    record_result "$suite" suiteerror "$wstatus" 0 /dev/null "$werr" \
       'worker suite must report every test, write no stderr and exit 0'
   fi
   report_unreported "$last" "$wstatus" "worker aborted before this test ran"
@@ -1011,11 +1195,13 @@ OPT_SHIFT=0
 # Parse -v -k -d <dir>; sets OPT_SHIFT to the number of consumed arguments.
 parse_options() {
   local opt OPTIND=1
-  while getopts ":vkd:" opt; do
+  while getopts ":vkd:t:j:" opt; do
     case "$opt" in
       v) V_PASS=1 ;;
       k) KEEP_TMP=1 ;;
       d) TEST_DIRS+=("$OPTARG") ;;
+      t) TAP_FILE="$OPTARG" ;;
+      j) JUNIT_FILE="$OPTARG" ;;
       *) usage ;;
     esac
   done
@@ -1068,6 +1254,7 @@ main() {
 
   init_run
   run_paths "${TEST_DIRS[@]}"
+  finish_run
 
   if [[ "$had_test_error" -ne 0 ]]; then
     exit 1

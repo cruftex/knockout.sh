@@ -38,6 +38,8 @@ follow them unless the user decides otherwise.
 | Turbo suite | `*.turbo.suite.sh`: bash fn-suite, sourced once, each case runs in a subshell |
 | Worker suite | `*.worker.suite*`: any language; started once with `KNOCKOUT_WORKER=1`, cases on stdin, reports on stdout (protocol in the header) |
 | Bash suite | `source <(knockout fn-suite)`, `t_*` functions, last line `testsuite_main "$@"` |
+| Skip | exit 77 with no stderr: `SKIP`, not a failure |
+| Python worker | `knockout python3-unittest discover …`: stderr is **not** a failure, unittest decides |
 | Test description | first stdout line starting with `# ` |
 | Test directories | a `knockout-tests/` dir, or an empty `.knockout-tests` marker in any dir |
 | `ko` = `ko run` | runs all test dirs below the cwd (hidden dirs skipped, sorted) |
