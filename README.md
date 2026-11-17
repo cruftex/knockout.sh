@@ -36,7 +36,7 @@ Progress output:
 
 ```
 [L 1/1] examples/example.suite.sh  0.015s
-[T 1/4] test/knockout_test.sh  0.833s
+[T 1/4] test/knockout-test.sh  0.833s
 [S 2/4] examples/example.suite.sh::another  0.010s  -- another example test
 ```
 
@@ -105,8 +105,16 @@ cases took 1.0s instead of 9.1s.
 
 ```bash
 make test             # black-box suite + dogfooding run of knockout on itself
-KO_UNDER_TEST=/path/to/ko bash test/knockout_test.sh   # test another copy
+KO_UNDER_TEST=/path/to/ko bash test/knockout-test.sh   # test another copy
+PATH=$PWD/bin:$PATH test/knockout.suite.sh usage_without_args   # run a single case
 ```
+
+The black-box tests live in `test/knockout.suite.sh`, a normal fn-suite of
+`t_*` functions. They run twice: as a suite through knockout's own runner, and
+through `test/knockout-test.sh`, which stubs `knockout` and `testsuite_main`
+as no-ops, sources the suite and calls every `t_*` function directly. That
+second run uses no knockout code, so a bug in knockout's suite runner cannot
+hide failing tests.
 
 The header comment of `bin/knockout` is its canonical generation prompt and is
 kept verbatim.

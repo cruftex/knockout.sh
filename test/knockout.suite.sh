@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
+# knockout self-test suite (t_* functions). Runs via knockout (`ko`), a second
+# time independently via test/knockout-test.sh, or one case:
+#   test/knockout.suite.sh <name>
 set -euo pipefail
+source <(knockout fn-suite)
 
 KO_UNDER_TEST="${KO_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/knockout}"
+if [[ ! -x "$KO_UNDER_TEST" ]]; then
+  printf 'ko under test is not executable: %s\n' "$KO_UNDER_TEST" >&2
+  exit 2
+fi
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ko-test.XXXXXXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT
 
-PASS_COUNT=0
-FAIL_COUNT=0
-XFAIL_COUNT=0
-XPASS_COUNT=0
 RUN_STATUS=0
 
 fail_msg() {
@@ -94,43 +98,8 @@ case_dir() {
   printf '%s' "$ROOT/$name"
 }
 
-run_case() {
-  local name="$1"
-  local fn="$2"
-
-  printf 'TEST %s\n' "$name"
-  if "$fn"; then
-    PASS_COUNT=$((PASS_COUNT + 1))
-    printf '  PASS\n'
-  else
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-    printf '  FAIL\n'
-  fi
-}
-
-run_xfail_case() {
-  local name="$1"
-  local fn="$2"
-  local diag
-  diag="$(mktemp "$ROOT/xfail.XXXXXXXXXX")"
-
-  printf 'TEST %s\n' "$name"
-  if "$fn" 2>"$diag"; then
-    XPASS_COUNT=$((XPASS_COUNT + 1))
-    printf '  XPASS\n'
-    if [[ -s "$diag" ]]; then
-      sed 's/^/    /' "$diag" >&2
-    fi
-  else
-    XFAIL_COUNT=$((XFAIL_COUNT + 1))
-    printf '  XFAIL\n'
-    if [[ -s "$diag" ]]; then
-      sed 's/^/    expected failure: /' "$diag"
-    fi
-  fi
-}
-
-test_usage_without_args() {
+t_usage_without_args() {
+  echo "# usage without arguments"
   local d out err
   d="$(case_dir usage)"
   out="$d/out"
@@ -147,7 +116,8 @@ test_usage_without_args() {
   assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [-v] [-d] [<file-or-dir>...]" || return
 }
 
-test_executable_success_and_description() {
+t_executable_success_and_description() {
+  echo "# executable test success and description"
   local d t out err
   d="$(case_dir executable-success)"
   t="$d/pass"
@@ -167,7 +137,8 @@ SCRIPT
   assert_contains "$out" "-- executable test passed" || return
 }
 
-test_non_executable_sh_runs_with_bash() {
+t_non_executable_sh_runs_with_bash() {
+  echo "# non-executable .sh runs via bash"
   local d t out err
   d="$(case_dir sh-fallback)"
   t="$d/pass.sh"
@@ -185,7 +156,8 @@ SCRIPT
   assert_contains "$out" "-- bash fallback worked" || return
 }
 
-test_rejects_non_executable_non_sh() {
+t_rejects_non_executable_non_sh() {
+  echo "# non-executable non-.sh is rejected"
   local d t out err
   d="$(case_dir rejects-non-runnable)"
   t="$d/not-runnable.txt"
@@ -201,7 +173,8 @@ test_rejects_non_executable_non_sh() {
   assert_contains "$err" "die: file not executable and not .sh: $t" || return
 }
 
-test_stderr_marks_failure() {
+t_stderr_marks_failure() {
+  echo "# stderr marks test failure"
   local d t out err
   d="$(case_dir stderr-failure)"
   t="$d/stderr-pass"
@@ -223,7 +196,8 @@ SCRIPT
   assert_contains "$err" "stderr body" || return
 }
 
-test_nonzero_failure_continues() {
+t_nonzero_failure_continues() {
+  echo "# nonzero failure reports and continues"
   local d fail pass out err
   d="$(case_dir failure-continues)"
   fail="$d/01_fail"
@@ -252,7 +226,8 @@ SCRIPT
   assert_contains "$err" "bad stdout" || return
 }
 
-test_directory_expansion_is_non_recursive() {
+t_directory_expansion_is_non_recursive() {
+  echo "# directory expansion is non-recursive"
   local d top nested out err
   d="$(case_dir directory-nonrecursive)"
   mkdir -p "$d/nested"
@@ -280,7 +255,8 @@ SCRIPT
   assert_not_contains "$out" "$nested" || return
 }
 
-test_keep_tmp_writes_artifacts() {
+t_keep_tmp_writes_artifacts() {
+  echo "# -d keeps stdout/stderr/status artifacts"
   local d t out err kept
   d="$(case_dir keep-tmp)"
   t="$d/pass"
@@ -304,7 +280,8 @@ SCRIPT
   rm -rf "$kept"
 }
 
-test_verbose_passes_through_stdout() {
+t_verbose_passes_through_stdout() {
+  echo "# -v passes through stdout"
   local d t out err
   d="$(case_dir verbose)"
   t="$d/pass"
@@ -325,7 +302,8 @@ SCRIPT
   assert_contains "$out" "-- visible description" || return
 }
 
-test_testsuite_runs_generated_cases() {
+t_testsuite_runs_generated_cases() {
+  echo "# extensionless .suite generates cases with shell and tab parsing"
   local d suite out err
   d="$(case_dir generated-suite)"
   suite="$d/x.suite"
@@ -371,7 +349,8 @@ SCRIPT
   assert_contains "$out" "-- tab generated case" || return
 }
 
-test_testsuite_description_lines_are_ignored() {
+t_testsuite_description_lines_are_ignored() {
+  echo "# testsuite description lines are ignored"
   local d suite out err
   d="$(case_dir generated-suite-comments)"
   suite="$d/x.suite"
@@ -408,7 +387,8 @@ SCRIPT
   assert_not_contains "$out" "[S 2/2]" || return
 }
 
-test_fn_suite_prints_handler() {
+t_fn_suite_prints_handler() {
+  echo "# fn-suite prints a sourceable handler"
   local dir out err
   dir="$(case_dir fn-suite-print)"
   out="$dir/out"
@@ -423,7 +403,8 @@ test_fn_suite_prints_handler() {
     || { fail_msg "fn-suite output does not define testsuite_main"; return 1; }
 }
 
-test_fn_suite_sourced_by_suite_without_install() {
+t_fn_suite_sourced_by_suite_without_install() {
+  echo "# suite sources fn-suite from the running knockout"
   local dir out err suite
   dir="$(case_dir fn-suite-source)"
   out="$dir/out"
@@ -449,7 +430,8 @@ SCRIPT
   assert_contains "$out" "-- third" || return
 }
 
-test_mixed_run_has_exact_shared_total() {
+t_mixed_run_has_exact_shared_total() {
+  echo "# mixed run has exact shared total"
   local dir out err
   dir="$(case_dir mixed-total)"
   out="$dir/out"
@@ -472,7 +454,8 @@ SCRIPT
   assert_contains "$out" "[T 4/4] $dir/c.sh" || return
 }
 
-test_unnamed_suite_output_fails_with_hint() {
+t_unnamed_suite_output_fails_with_hint() {
+  echo "# testsuite output from non-suite name fails with hint"
   local dir out err t
   dir="$(case_dir unnamed-suite)"
   out="$dir/out"
@@ -486,7 +469,8 @@ test_unnamed_suite_output_fails_with_hint() {
   assert_not_contains "$out" "[S " || return
 }
 
-test_broken_listing_fails_and_continues() {
+t_broken_listing_fails_and_continues() {
+  echo "# broken suite listings fail and the run continues"
   local dir out err
   dir="$(case_dir broken-listing)"
   out="$dir/out"
@@ -505,7 +489,8 @@ test_broken_listing_fails_and_continues() {
   assert_not_contains "$out" "[S " || return
 }
 
-test_project_mode_discovers_test_dirs() {
+t_project_mode_discovers_test_dirs() {
+  echo "# no arguments runs test dirs below cwd"
   local d out err here
   d="$(case_dir project-mode)"
   out="$d/out"
@@ -528,7 +513,8 @@ test_project_mode_discovers_test_dirs() {
   assert_not_contains "$out" ".knockout-tests" || return
 }
 
-test_marker_file_is_not_a_test() {
+t_marker_file_is_not_a_test() {
+  echo "# marker file in a test dir is not a test"
   local d out err
   d="$(case_dir marker-ignored)"
   out="$d/out"
@@ -557,7 +543,8 @@ normalize_run() {
   sed -E 's/  [0-9]+\.[0-9]+s/  Ns/; s#[^ ]*/s\.(turbo\.)?suite\.sh#SUITE#g' "$1"
 }
 
-test_turbo_matches_forked() {
+t_turbo_matches_forked() {
+  echo "# turbo suite reports exactly like a forked suite"
   local d body
   d="$(case_dir turbo-golden)"
   read -r -d '' body <<'BODY' || true
@@ -584,7 +571,8 @@ BODY
   assert_contains "$d/t.out" "[S 3/4] $d/s.turbo.suite.sh::spaces (a\\ b c)" || return
 }
 
-test_turbo_isolates_cases() {
+t_turbo_isolates_cases() {
+  echo "# turbo suite isolates cases in subshells"
   local d
   d="$(case_dir turbo-isolation)"
   write_fn_suite "$d/i.turbo.suite.sh" <<'BODY'
@@ -604,7 +592,8 @@ BODY
   assert_eq "2" "$(wc -l <"$d/count")" "top-level code should run once per worker, not per case" || return
 }
 
-test_turbo_source_failure() {
+t_turbo_source_failure() {
+  echo "# turbo suite source failure skips its tests"
   local d
   d="$(case_dir turbo-source-fail)"
   write_fn_suite "$d/bad.turbo.suite.sh" <<'BODY'
@@ -622,7 +611,8 @@ BODY
   assert_contains "$d/out" "[T 3/3] $d/after.sh" || return
 }
 
-test_suite_cases_get_empty_stdin() {
+t_suite_cases_get_empty_stdin() {
+  echo "# suite cases get empty stdin (forked and turbo)"
   local d f
   d="$(case_dir suite-stdin)"
   for f in "$d/a.suite.sh" "$d/a.turbo.suite.sh"; do
@@ -638,38 +628,4 @@ BODY
   assert_contains "$d/out" "[S 4/4]" || return
 }
 
-if [[ ! -x "$KO_UNDER_TEST" ]]; then
-  printf 'ko under test is not executable: %s\n' "$KO_UNDER_TEST" >&2
-  exit 2
-fi
-
-run_case "usage without arguments" test_usage_without_args
-run_case "executable test success and description" test_executable_success_and_description
-run_case "non-executable .sh runs via bash" test_non_executable_sh_runs_with_bash
-run_case "non-executable non-.sh is rejected" test_rejects_non_executable_non_sh
-run_case "stderr marks test failure" test_stderr_marks_failure
-run_case "nonzero failure reports and continues" test_nonzero_failure_continues
-run_case "directory expansion is non-recursive" test_directory_expansion_is_non_recursive
-run_case "-d keeps stdout/stderr/status artifacts" test_keep_tmp_writes_artifacts
-run_case "-v passes through stdout" test_verbose_passes_through_stdout
-run_case "extensionless .suite generates cases with shell and tab parsing" test_testsuite_runs_generated_cases
-
-run_case "testsuite description lines are ignored" test_testsuite_description_lines_are_ignored
-run_case "fn-suite prints a sourceable handler" test_fn_suite_prints_handler
-run_case "suite sources fn-suite from the running knockout" test_fn_suite_sourced_by_suite_without_install
-run_case "mixed run has exact shared total" test_mixed_run_has_exact_shared_total
-run_case "testsuite output from non-suite name fails with hint" test_unnamed_suite_output_fails_with_hint
-run_case "broken suite listings fail and the run continues" test_broken_listing_fails_and_continues
-run_case "no arguments runs test dirs below cwd" test_project_mode_discovers_test_dirs
-run_case "marker file in a test dir is not a test" test_marker_file_is_not_a_test
-run_case "turbo suite reports exactly like a forked suite" test_turbo_matches_forked
-run_case "turbo suite isolates cases in subshells" test_turbo_isolates_cases
-run_case "turbo suite source failure skips its tests" test_turbo_source_failure
-run_case "suite cases get empty stdin (forked and turbo)" test_suite_cases_get_empty_stdin
-
-printf '\nsummary: %d passed, %d failed, %d xfailed, %d xpassed\n' \
-  "$PASS_COUNT" "$FAIL_COUNT" "$XFAIL_COUNT" "$XPASS_COUNT"
-
-if [[ "$FAIL_COUNT" -ne 0 || "$XPASS_COUNT" -ne 0 ]]; then
-  exit 1
-fi
+testsuite_main "$@"
