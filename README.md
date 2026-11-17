@@ -7,8 +7,8 @@ generator* and emit a list of further test invocations.
 ## Install
 
 ```bash
-./install.sh          # symlinks bin/knockout to ~/.local/bin/knockout and ~/.local/bin/ko
-                      # (bin/knockout is self-contained; copying it works too)
+./install.sh          # copies bin/knockout to ~/.local/bin/knockout, ko -> knockout
+PREFIX=/usr/local ./install.sh   # install elsewhere; rerun to update
 ```
 
 ## Usage
