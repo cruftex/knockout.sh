@@ -80,6 +80,18 @@ set -euo pipefail
 # - If no test directory is found, print an explanatory error and usage.
 # - Directory expansion never treats ".knockout-tests" as a test.
 #
+# Sourceable:
+# - When sourced, the script only defines its functions and defaults; nothing
+#   runs and no traps are set. When executed, main parses options and runs.
+#
+# Development and tests:
+# - test/knockout.turbo.suite.sh sources the knockout under test (KO_UNDER_TEST,
+#   default: the knockout running the suite) and calls its functions directly
+#   (unit tests). Only a few integration tests run the complete script.
+# - test/knockout-test.sh runs the same t_* functions a second time without
+#   any knockout as harness, so a runner bug cannot hide failing tests.
+# - Testing another implementation: KO_UNDER_TEST=/path/to/knockout ko test/
+#
 # Turbo testsuites:
 # - Files named "*.turbo.suite.sh" are bash fn-suites that are listed like any
 #   testsuite, but in phase R are sourced once into a separate worker bash.
@@ -203,27 +215,11 @@ testsuite_main() {
 FN_SUITE
 }
 
-if [[ "${1:-}" == fn-suite ]]; then
-  print_fn_suite
-  exit 0
-fi
-
 usage() {
   printf 'usage: %s [-v] [-d] [<file-or-dir>...]\n' "${0##*/}" >&2
   printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout fn-suite)\n' "${0##*/}" >&2
   exit 1
 }
-
-V_PASS=0
-KEEP_TMP=0
-while getopts ":vd" opt; do
-  case "$opt" in
-    v) V_PASS=1 ;;
-    d) KEEP_TMP=1 ;;
-    *) usage ;;
-  esac
-done
-shift $((OPTIND - 1))
 
 # Project mode: test dirs below cwd, marked by name or by a marker file.
 discover_test_dirs() {
@@ -234,20 +230,10 @@ discover_test_dirs() {
     | sed 's#^\./##' | LC_ALL=C sort -u
 }
 
-if [[ "$#" -eq 0 ]]; then
-  mapfile -t PROJECT_DIRS < <(discover_test_dirs)
-  if [[ "${#PROJECT_DIRS[@]}" -eq 0 ]]; then
-    printf 'no test dirs found (knockout-tests/ or .knockout-tests) below %s\n' "$PWD" >&2
-    usage
-  fi
-  set -- "${PROJECT_DIRS[@]}"
-fi
+V_PASS=0
+KEEP_TMP=0
+had_test_error=0
 
-# Tests calling `knockout fn-suite` get this same knockout, installed or not.
-PATH="$(dirname "$(readlink -f "$0")"):$PATH"
-export PATH
-
-TMPDIR="$(mktemp -d)"
 cleanup() {
   if [[ "$KEEP_TMP" -eq 0 ]]; then
     rm -rf "$TMPDIR"
@@ -255,9 +241,21 @@ cleanup() {
     printf 'keeping tmpdir: %s\n' "$TMPDIR" >&2
   fi
 }
-trap cleanup EXIT
 
-had_test_error=0
+# Fresh run state. Without argument: own temp dir, removed on exit.
+# With a directory (tests): use it, no trap; the caller owns it.
+init_run() {
+  if [[ -n "${1:-}" ]]; then
+    TMPDIR="$1"
+  else
+    TMPDIR="$(mktemp -d)"
+    trap cleanup EXIT
+  fi
+  had_test_error=0
+  TOTAL_TESTS=0
+  RUN_IDX=0
+  SUITE_LINES_FILE=()
+}
 
 die() {
   printf 'ERROR\n' >&2
@@ -376,12 +374,21 @@ extract_description_from_stdout() {
 }
 
 is_testsuite_output() {
-  [[ "$(head -n 1 "$1" || true)" == "#!testsuite" ]]
+  local first=""
+  IFS= read -r first <"$1" || true
+  [[ "$first" == "#!testsuite" ]]
 }
 
 write_testsuite_lines() {
   # Drop the "#!testsuite" marker and "# " description lines.
-  tail -n +2 "$1" | grep -v '^# ' >"$2" || true
+  local line skip=1
+  {
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if (( skip )); then skip=0; continue; fi
+      [[ "$line" == '# '* ]] && continue
+      printf '%s\n' "$line"
+    done <"$1"
+  } >"$2"
 }
 
 # --- execution wrapper ---
@@ -406,7 +413,7 @@ run_once_capture() {
   : >"$status_file"
 
   local start end
-  start="$(date +%s.%N)"
+  start="$EPOCHREALTIME"
 
   set +e
   if [[ -x "$file" ]]; then
@@ -427,8 +434,8 @@ run_once_capture() {
 
   printf '%s\n' "$RUN_STATUS" >"$status_file"
 
-  end="$(date +%s.%N)"
-  RUN_DT="$(awk -v s="$start" -v e="$end" 'BEGIN { printf "%.3f", (e - s) }')"
+  end="$EPOCHREALTIME"
+  elapsed_secs "$start" "$end" RUN_DT
 
   if [[ "$RUN_STATUS" -eq 88 ]] && is_testsuite_output "$out_file"; then
     RUN_DESC=""
@@ -465,13 +472,22 @@ collect_files_or_die() {
   done
 }
 
-declare -A SUITE_LINES_FILE
+declare -gA SUITE_LINES_FILE
 TOTAL_TESTS=0
 
 # Count runnable test invocations in a suite lines file.
 count_suite_lines() {
-  [[ -s "$1" ]] || { printf '0'; return 0; }
-  awk 'NF{c++} END{print c+0}' "$1"
+  local line c=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "${line//[[:space:]]/}" ]] && c=$((c + 1))
+  done <"$1"
+  printf '%d' "$c"
+}
+
+# Elapsed seconds (3 decimals) between two $EPOCHREALTIME values into variable $3.
+elapsed_secs() {
+  local us=$(( ${2//[.,]/} - ${1//[.,]/} ))
+  printf -v "$3" '%d.%03d' $(( us / 1000000 )) $(( us % 1000000 / 1000 ))
 }
 
 phase_L() {
@@ -728,11 +744,53 @@ phase_R() {
   done
 }
 
-collect_files_or_die "$@"
-phase_L
-phase_R
+# Run the given files/dirs: collect, phase L, phase R. Requires init_run.
+run_paths() {
+  collect_files_or_die "$@"
+  phase_L
+  phase_R
+}
 
-if [[ "$had_test_error" -ne 0 ]]; then
-  exit 1
+main() {
+  if [[ "${1:-}" == fn-suite ]]; then
+    print_fn_suite
+    exit 0
+  fi
+
+  local opt
+  while getopts ":vd" opt; do
+    case "$opt" in
+      v) V_PASS=1 ;;
+      d) KEEP_TMP=1 ;;
+      *) usage ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  if [[ "$#" -eq 0 ]]; then
+    local -a project_dirs
+    mapfile -t project_dirs < <(discover_test_dirs)
+    if [[ "${#project_dirs[@]}" -eq 0 ]]; then
+      printf 'no test dirs found (knockout-tests/ or .knockout-tests) below %s\n' "$PWD" >&2
+      usage
+    fi
+    set -- "${project_dirs[@]}"
+  fi
+
+  # Tests calling `knockout fn-suite` get this same knockout, installed or not.
+  PATH="$(dirname "$(readlink -f "$0")"):$PATH"
+  export PATH
+
+  init_run
+  run_paths "$@"
+
+  if [[ "$had_test_error" -ne 0 ]]; then
+    exit 1
+  fi
+  exit 0
+}
+
+# Sourced: define functions and defaults only.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-exit 0
