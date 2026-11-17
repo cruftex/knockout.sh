@@ -323,7 +323,7 @@ SCRIPT
 test_testsuite_runs_generated_cases() {
   local d suite out err
   d="$(case_dir generated-suite)"
-  suite="$d/suite"
+  suite="$d/x.suite"
   out="$d/out"
   err="$d/err"
 
@@ -359,7 +359,7 @@ SCRIPT
   run_ko "$out" "$err" "$suite"
   assert_eq "0" "$RUN_STATUS" "generated suite should pass" || return
   assert_file_empty "$err" || return
-  assert_contains "$out" "[T 1/1] $suite" || return
+  assert_contains "$out" "[L 1/1] $suite" || return
   assert_contains "$out" "[S 1/2] $suite::alpha" || return
   assert_contains "$out" "-- alpha generated case" || return
   assert_contains "$out" "::tabbed" || return
@@ -369,7 +369,7 @@ SCRIPT
 test_testsuite_description_lines_are_ignored() {
   local d suite out err
   d="$(case_dir generated-suite-comments)"
-  suite="$d/suite"
+  suite="$d/x.suite"
   out="$d/out"
   err="$d/err"
 
@@ -423,7 +423,7 @@ test_fn_suite_sourced_by_suite_without_install() {
   dir="$(case_dir fn-suite-source)"
   out="$dir/out"
   err="$dir/err"
-  suite="$dir/suite.sh"
+  suite="$dir/x.suite.sh"
 
   cat >"$suite" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -444,6 +444,62 @@ SCRIPT
   assert_contains "$out" "-- third" || return
 }
 
+test_mixed_run_has_exact_shared_total() {
+  local dir out err
+  dir="$(case_dir mixed-total)"
+  out="$dir/out"
+  err="$dir/err"
+
+  printf '#!/usr/bin/env bash\necho ok\n' >"$dir/a.sh"
+  cat >"$dir/b.suite.sh" <<'SCRIPT'
+if [[ "$#" -eq 0 ]]; then printf '#!testsuite\none\ntwo\n'; exit 88; fi
+echo "case $1"
+SCRIPT
+  printf '#!/usr/bin/env bash\necho ok\n' >"$dir/c.sh"
+
+  run_ko "$out" "$err" "$dir/a.sh" "$dir/b.suite.sh" "$dir/c.sh"
+  assert_eq "0" "$RUN_STATUS" "mixed run should pass" || return
+  assert_file_empty "$err" || return
+  assert_contains "$out" "[L 1/1] $dir/b.suite.sh" || return
+  assert_contains "$out" "[T 1/4] $dir/a.sh" || return
+  assert_contains "$out" "[S 2/4] $dir/b.suite.sh::one" || return
+  assert_contains "$out" "[S 3/4] $dir/b.suite.sh::two" || return
+  assert_contains "$out" "[T 4/4] $dir/c.sh" || return
+}
+
+test_unnamed_suite_output_fails_with_hint() {
+  local dir out err t
+  dir="$(case_dir unnamed-suite)"
+  out="$dir/out"
+  err="$dir/err"
+  t="$dir/sneaky.sh"
+  printf '#!/usr/bin/env bash\nprintf "#!testsuite\\none\\n"\nexit 88\n' >"$t"
+
+  run_ko "$out" "$err" "$t"
+  assert_eq "1" "$RUN_STATUS" "testsuite output from non-suite name should fail" || return
+  assert_contains "$err" "hint: testsuite output from a file not named as testsuite" || return
+  assert_not_contains "$out" "[S " || return
+}
+
+test_broken_listing_fails_and_continues() {
+  local dir out err
+  dir="$(case_dir broken-listing)"
+  out="$dir/out"
+  err="$dir/err"
+
+  printf 'echo "no marker"\nexit 0\n' >"$dir/nomarker.suite.sh"
+  printf 'printf "#!testsuite\\none\\n"; echo oops >&2; exit 88\n' >"$dir/noisy.suite.sh"
+  printf 'echo ok\n' >"$dir/plain.sh"
+
+  run_ko "$out" "$err" "$dir/nomarker.suite.sh" "$dir/noisy.suite.sh" "$dir/plain.sh"
+  assert_eq "1" "$RUN_STATUS" "broken listings should fail the run" || return
+  assert_contains "$err" "test: $dir/nomarker.suite.sh" || return
+  assert_contains "$err" "test: $dir/noisy.suite.sh" || return
+  assert_contains "$err" "hint: testsuite listing must exit 88" || return
+  assert_contains "$out" "[T 1/1] $dir/plain.sh" || return
+  assert_not_contains "$out" "[S " || return
+}
+
 if [[ ! -x "$KO_UNDER_TEST" ]]; then
   printf 'ko under test is not executable: %s\n' "$KO_UNDER_TEST" >&2
   exit 2
@@ -458,11 +514,14 @@ run_case "nonzero failure reports and continues" test_nonzero_failure_continues
 run_case "directory expansion is non-recursive" test_directory_expansion_is_non_recursive
 run_case "-d keeps stdout/stderr/status artifacts" test_keep_tmp_writes_artifacts
 run_case "-v passes through stdout" test_verbose_passes_through_stdout
-run_case "testsuite generated cases support shell and tab parsing" test_testsuite_runs_generated_cases
+run_case "extensionless .suite generates cases with shell and tab parsing" test_testsuite_runs_generated_cases
 
 run_case "testsuite description lines are ignored" test_testsuite_description_lines_are_ignored
 run_case "fn-suite prints a sourceable handler" test_fn_suite_prints_handler
 run_case "suite sources fn-suite from the running knockout" test_fn_suite_sourced_by_suite_without_install
+run_case "mixed run has exact shared total" test_mixed_run_has_exact_shared_total
+run_case "testsuite output from non-suite name fails with hint" test_unnamed_suite_output_fails_with_hint
+run_case "broken suite listings fail and the run continues" test_broken_listing_fails_and_continues
 
 printf '\nsummary: %d passed, %d failed, %d xfailed, %d xpassed\n' \
   "$PASS_COUNT" "$FAIL_COUNT" "$XFAIL_COUNT" "$XPASS_COUNT"

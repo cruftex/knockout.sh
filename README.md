@@ -29,22 +29,29 @@ knockout [-v] [-d] <file-or-dir>...
 Progress output:
 
 ```
-[T 1/1] examples/example-suite.sh  0.011s
-[S 1/3] examples/example-suite.sh::another  0.008s  -- another example test
+[L 1/1] examples/example.suite.sh  0.015s
+[T 1/4] test/knockout_test.sh  0.833s
+[S 2/4] examples/example.suite.sh::another  0.010s  -- another example test
 ```
 
 ## Testsuite protocol
 
-A test is a testsuite generator if it exits with status **88** and its stdout
-starts with the line `#!testsuite`. Each following line is one test
-invocation of the same file:
+A file is a testsuite if its name ends in `.suite` or contains `.suite.`
+(`math.suite`, `math.suite.sh`, `math.suite.py`, ...); any runnable file
+works. Run without arguments, a suite must exit with status **88**, print
+`#!testsuite` as its first stdout line and write nothing to stderr. Each
+following line is one test invocation of the same file:
 
 - lines containing TABs are split on TABs,
 - otherwise they are parsed as Bash words (quoting allowed),
 - `# ` description lines and blank lines are ignored.
 
-Phase T runs every file once and collects suites. Phase S runs the generated
-cases.
+Phase L lists all suites first, so the total number of tests is known before
+any test runs. Phase R then runs everything in argument order with one shared
+counter: plain files as `T`, suite cases as `S`.
+
+Naming is strict: a broken suite listing is a failure, and so is a file *not*
+named as a suite that emits testsuite output (the error hints to rename it).
 
 ### Writing suites in Bash
 
@@ -67,7 +74,7 @@ test name, it calls that function (leading `--options` are skipped).
 `TESTSUITE_PREFIX` overrides the `t_` prefix. When run by knockout, the
 runner's own directory is put first on `PATH`, so a suite always gets the
 handler of the knockout running it, even when knockout is not installed. See
-`examples/example-suite.sh`.
+`examples/example.suite.sh`.
 
 ## Development
 
