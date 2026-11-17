@@ -79,6 +79,8 @@ To run a single test, call it directly: `bash test/greeting-test.sh`.
 A Bash file named `*.suite.sh` that defines `t_*` functions gives one test per
 function; see [Writing suites in Bash](#writing-suites-in-bash). Suites in
 other languages implement the [testsuite protocol](#testsuite-protocol).
+To run many cases in one process in any language, use a
+[worker suite](#worker-suites); Python unittest is built in.
 
 ### Tips
 
@@ -96,10 +98,11 @@ other languages implement the [testsuite protocol](#testsuite-protocol).
 ko                          # = ko run: run the project's tests
 knockout [run] [-v] [-k] [-d <dir>]...
 knockout fn-suite           # print the bash t_* suite handler
+knockout python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite
 ```
 
-- A positional argument is always a command: `run` (the default) or
-  `fn-suite`. To run a single test, call it directly.
+- A positional argument is always a command: `run` (the default),
+  `fn-suite` or `python3-unittest`. To run a single test, call it directly.
 - Without `-d`, knockout runs every test directory found recursively below
   the current directory: directories named `knockout-tests/`, and
   directories containing an empty marker file `.knockout-tests`
@@ -179,6 +182,67 @@ cases took 1.0s instead of 9.1s.
   is the worker, not the suite file; stdin is `/dev/null`.
 - If sourcing fails (non-zero status or stderr), the suite is reported and
   its tests are not run.
+
+### Worker suites
+
+A file named `*.worker.suite` or `*.worker.suite.*` is a testsuite in any
+language that runs all its tests in **one process**, instead of one process
+per case. It lists its tests like any suite, and run with a test name it runs
+that one test. In phase R knockout starts it once with `KNOCKOUT_WORKER=1`:
+
+- **stdin**: one line per test, `INDEX<TAB>PREFIX<TAB>LINE`. `LINE` is the
+  suite's own listing line, verbatim (split on the first two TABs only).
+- For each test the worker writes `PREFIX.out`, `PREFIX.err` and
+  `PREFIX.status` (the exit status), then reports it.
+- **stdout**: `#!worker` once setup succeeded, then `INDEX SECONDS` per finished
+  test, in stdin order.
+- **stderr**: must stay empty. The worker must report every test and exit 0.
+
+Results are judged from the files exactly as for forked tests. A worker that
+prints no `#!worker` line, stops early, writes to stderr, exits non-zero or
+reports an unexpected line fails as a suite file, and its unreported tests are
+reported as not run.
+
+#### Example: Python unittest
+
+knockout has a built-in worker for Python unittest tests:
+`knockout python3-unittest discover [-s START] [-t TOP]` takes the same
+arguments as `python3 -m unittest discover`. `examples/python/` is a normal
+Python project with unittest tests; knockout is added with one file:
+
+```
+examples/python/
+  calc.py
+  tests/__init__.py
+  tests/test_calc.py
+  knockout-tests/
+    unittest.worker.suite.sh
+```
+
+`unittest.worker.suite.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Runs the project's unittest tests with knockout (one process, fork per test).
+cd "$(dirname "$0")/.." && exec knockout python3-unittest discover -s tests -t . "$@"
+```
+
+It changes to the project root and runs the same discovery as
+`python3 -m unittest discover -s tests -t .` there. `ko` then runs each test as
+its own case:
+
+```
+[S 1/3] examples/python/knockout-tests/unittest.worker.suite.sh::tests.test_calc.CalcTest.test_add  0.004s  -- adds two numbers
+```
+
+The worker imports the tests once and forks per test, so each test is isolated
+without re-importing. A test's docstring becomes its description, skips are
+noted on stdout, and a failure shows the traceback in the error report. To run
+one test, call the suite file with its id:
+`bash examples/python/knockout-tests/unittest.worker.suite.sh tests.test_calc.CalcTest.test_add`.
+
+With 500 trivial unittest cases, the run took 1.5s as a worker suite and 47s
+with the same file as a forked suite (`*.suite.sh`).
 
 ## Development
 

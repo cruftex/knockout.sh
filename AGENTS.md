@@ -26,7 +26,7 @@ follow them unless the user decides otherwise.
   suite is a failure with a hint, not silently detected.
 - **One self-contained file.** `bin/knockout` has no library files and no install location. Anything
   that suites need is emitted by knockout itself (`knockout fn-suite`).
-- **Positional arguments are commands** (`run`, the default, and `fn-suite`); anything else is an
+- **Positional arguments are commands** (`run`, the default, `fn-suite` and `python3-unittest`); anything else is an
   error. Tests are selected by directory (`-d <dir>`, repeatable) or by discovery. A single test is
   run by calling it directly, never through `ko`.
 
@@ -36,6 +36,7 @@ follow them unless the user decides otherwise.
 |---|---|
 | Testsuite | name ends in `.suite` or contains `.suite.` (`x.suite`, `x.suite.sh`, `x.suite.py`); any runnable file |
 | Turbo suite | `*.turbo.suite.sh`: bash fn-suite, sourced once, each case runs in a subshell |
+| Worker suite | `*.worker.suite*`: any language; started once with `KNOCKOUT_WORKER=1`, cases on stdin, reports on stdout (protocol in the header) |
 | Bash suite | `source <(knockout fn-suite)`, `t_*` functions, last line `testsuite_main "$@"` |
 | Test description | first stdout line starting with `# ` |
 | Test directories | a `knockout-tests/` dir, or an empty `.knockout-tests` marker in any dir |

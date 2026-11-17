@@ -16,6 +16,8 @@ set -euo pipefail
 # - run (default): run the test directories given with -d, or, without -d,
 #   all test directories found below the current directory (project mode).
 # - fn-suite: print the bash t_* testsuite handler (see below).
+# - python3-unittest discover [-s START] [-t TOP] [TEST_ID]: run Python unittest
+#   tests as a worker testsuite (see "Python unittest worker" below).
 # - Anything else: print usage and exit 1. Single tests are run by calling them directly.
 #
 # Execution rules:
@@ -107,6 +109,41 @@ set -euo pipefail
 #   forked tests; progress lines and timing are identical in format.
 # - If sourcing fails (non-zero status or stderr output), that is a failure of
 #   the suite file and its tests are reported as not run.
+#
+# Worker testsuites:
+# - Files named "*.worker.suite" or containing ".worker.suite." are testsuites in any
+#   language that run all their listed tests in one process. Listing (phase L) is
+#   unchanged. Run with a test name and without KNOCKOUT_WORKER, a worker suite runs
+#   that single test like any testsuite.
+# - In phase R the file is started once, with the environment variable
+#   KNOCKOUT_WORKER=1 and these streams:
+#     * stdin: one line per test, in listing order: INDEX<TAB>PREFIX<TAB>LINE
+#       INDEX is the progress counter value, PREFIX an absolute path prefix, LINE
+#       the listing line verbatim (split on the first two TABs only).
+#     * stdout: reports. First the line "#!worker" once setup succeeded, then one
+#       line "INDEX SECONDS" (e.g. "3 0.012") per finished test, in stdin order.
+#     * stderr: worker errors; any output is a failure of the suite file.
+# - Per test the worker writes PREFIX.out, PREFIX.err and PREFIX.status (the exit
+#   status as a decimal number) before reporting it. Pass/fail, description and
+#   error report are evaluated from these files exactly as for forked tests.
+# - With -v, the captured stdout/stderr of each test is printed after its report.
+# - No "#!worker" line: the suite file fails and its tests are reported as not run.
+#   Worker exits early, exits non-zero, or reports an unexpected line: the suite
+#   file fails and unreported tests are reported as not run.
+#
+# Python unittest worker:
+# - knockout contains the Python code (stdlib only) for a worker testsuite and runs
+#   it with python3 -c, passing on its arguments and the environment.
+# - Arguments mirror "python3 -m unittest discover": -s start dir (default "."),
+#   -t top-level dir (default: the start dir), pattern "test*.py". Relative paths
+#   are relative to the current directory. Other arguments are an error.
+# - Without TEST_ID and KNOCKOUT_WORKER: list the unittest test ids (exit 88).
+#   With TEST_ID: run that one test. With KNOCKOUT_WORKER=1: worker protocol;
+#   tests are imported once, each test runs in a forked child.
+# - Per test: the first docstring line is printed as "# " description, skips are
+#   noted on stdout, failures and errors write the traceback to stderr and exit 1.
+# - Usage in a worker testsuite file (e.g. knockout-tests/unittest.worker.suite.sh):
+#     cd "$(dirname "$0")/.." && exec knockout python3-unittest discover -s tests -t . "$@"
 #
 # Shell strictness:
 # - Runner uses: set -euo pipefail
@@ -221,9 +258,118 @@ testsuite_main() {
 FN_SUITE
 }
 
+# Python code of `knockout python3-unittest`, run with python3 -c (stdin carries
+# the worker cases). See "Python unittest worker" above.
+print_python3_unittest() {
+  cat <<'PYTHON3_UNITTEST'
+import os
+import sys
+import time
+import unittest
+
+USAGE = "usage: knockout python3-unittest discover [-s START] [-t TOP] [TEST_ID]"
+
+
+def parse_args(args):
+    if not args or args[0] != "discover":
+        sys.exit(USAGE)
+    start, top, rest = ".", None, args[1:]
+    while rest and rest[0] in ("-s", "-t"):
+        if len(rest) < 2:
+            sys.exit(USAGE)
+        if rest[0] == "-s":
+            start = rest[1]
+        else:
+            top = rest[1]
+        rest = rest[2:]
+    if len(rest) > 1 or (rest and rest[0].startswith("-")):
+        sys.exit(USAGE)
+    return start, top, rest[0] if rest else None
+
+
+def discover(start, top):
+    tests = {}
+    pending = [unittest.defaultTestLoader.discover(start, top_level_dir=top)]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, unittest.TestSuite):
+            pending.extend(item)
+        else:
+            tests[item.id()] = item
+    return tests
+
+
+def run_test(test):
+    """Runs one test with output on fd 1/2; returns the exit status."""
+    doc = test.shortDescription()
+    if doc:
+        print("# " + doc)
+    result = unittest.TestResult()
+    test.run(result)
+    for _, reason in result.skipped:
+        print("skipped: " + reason)
+    for _, trace in result.errors + result.failures:
+        sys.stderr.write(trace)
+    if result.unexpectedSuccesses:
+        sys.stderr.write("unexpected success\n")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return 0 if result.wasSuccessful() else 1
+
+
+def worker(tests):
+    print("#!worker", flush=True)
+    for line in sys.stdin:
+        idx, prefix, test_id = line.rstrip("\n").split("\t", 2)
+        t0 = time.monotonic()
+        pid = os.fork()
+        if pid == 0:
+            status = 1
+            try:
+                os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                os.dup2(os.open(prefix + ".out", flags, 0o644), 1)
+                os.dup2(os.open(prefix + ".err", flags, 0o644), 2)
+                test = tests.get(test_id)
+                if test is None:
+                    sys.stderr.write("no such test: %s\n" % test_id)
+                else:
+                    status = run_test(test)
+            finally:
+                os._exit(status)
+        status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+        if status < 0:
+            status = 128 - status
+        with open(prefix + ".status", "w") as f:
+            f.write("%d\n" % status)
+        print("%s %.3f" % (idx, time.monotonic() - t0), flush=True)
+
+
+def main():
+    sys.dont_write_bytecode = True
+    start, top, test_id = parse_args(sys.argv[1:])
+    tests = discover(start, top)
+    if os.environ.get("KNOCKOUT_WORKER") == "1":
+        worker(tests)
+    elif test_id is None:
+        print("#!testsuite")
+        for name in sorted(tests):
+            print(name)
+        sys.exit(88)
+    elif test_id in tests:
+        sys.exit(run_test(tests[test_id]))
+    else:
+        sys.exit("no such test: " + test_id)
+
+
+main()
+PYTHON3_UNITTEST
+}
+
 usage() {
   printf 'usage: %s [run] [-v] [-k] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
   printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout fn-suite)\n' "${0##*/}" >&2
+  printf '       %s python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite\n' "${0##*/}" >&2
   exit 1
 }
 
@@ -293,6 +439,12 @@ is_suite() {
 
 # Turbo testsuite: bash fn-suite sourced once into a worker, see run_turbo_suite.
 is_turbo() { [[ "${1##*/}" == *?.turbo.suite.sh ]]; }
+
+# Worker testsuite: any language, runs all cases in one process, see run_worker_suite.
+is_worker() {
+  local b="${1##*/}"
+  [[ "$b" == *?.worker.suite || "$b" == *?.worker.suite.* ]]
+}
 
 ensure_dir_ok_or_die() {
   local d="$1"
@@ -681,7 +833,8 @@ run_turbo_suite() {
   src="$TMPDIR/${sbase}.source"
   : >"$cases"
 
-  local -a designations=() bases=()
+  REPORT_DESIGNATIONS=()
+  REPORT_BASES=()
   local line idx="$RUN_IDX"
   local first=$((RUN_IDX + 1))
   while IFS= read -r line; do
@@ -689,9 +842,9 @@ run_turbo_suite() {
     parse_suite_line "$line"
     idx=$((idx + 1))
     suite_case_designation "$suite" "${PARSED_ARGS[@]}"
-    designations[idx]="$CASE_DESIGNATION"
-    sanitize_name "$CASE_DESIGNATION" "bases[$idx]"
-    printf '%s\0%s\0%s\0' "$idx" "${bases[idx]}" "${#PARSED_ARGS[@]}" >>"$cases"
+    REPORT_DESIGNATIONS[idx]="$CASE_DESIGNATION"
+    sanitize_name "$CASE_DESIGNATION" "REPORT_BASES[$idx]"
+    printf '%s\0%s\0%s\0' "$idx" "${REPORT_BASES[idx]}" "${#PARSED_ARGS[@]}" >>"$cases"
     if [[ "${#PARSED_ARGS[@]}" -gt 0 ]]; then
       printf '%s\0' "${PARSED_ARGS[@]}" >>"$cases"
     fi
@@ -699,24 +852,8 @@ run_turbo_suite() {
   local last="$idx"
   [[ "$last" -ge "$first" ]] || return 0
 
-  local sourced=0 got dt status out err st desc
   exec 4>&1
-  while read -r got dt; do
-    if [[ "$got" == SOURCED ]]; then
-      sourced=1
-      continue
-    fi
-    RUN_IDX="$got"
-    out="$TMPDIR/${bases[got]}.out"
-    err="$TMPDIR/${bases[got]}.err"
-    st="$TMPDIR/${bases[got]}.status"
-    status="$(<"$st")"
-    extract_description_from_stdout "$out" desc
-    print_progress "S" "$RUN_IDX" "$TOTAL_TESTS" "${designations[got]}" "$dt" "$desc"
-    if [[ -s "$err" || "$status" -ne 0 ]]; then
-      report_error "${designations[got]}" "$status" "$out" "$err"
-    fi
-  done < <(
+  read_worker_reports SOURCED 0 < <(
     bash -c "$TURBO_WORKER" ko-turbo "$suite" "$cases" "$TMPDIR" "$V_PASS" "$src" 3>&1 1>&4
     printf '%s\n' "$?" >"$wst"
   )
@@ -725,16 +862,125 @@ run_turbo_suite() {
 
   local wstatus
   wstatus="$(cat "$wst" 2>/dev/null || printf '?')"
-  if [[ "$sourced" -eq 0 ]]; then
+  if [[ "$REPORT_SETUP" -eq 0 && -z "$REPORT_BAD" ]]; then
     report_error "$suite" "$wstatus" "$src.out" "$src.err" \
       "turbo suite failed while being sourced; its $((last - first + 1)) tests were not run"
-  elif [[ "$RUN_IDX" -lt "$last" ]]; then
-    for (( idx = RUN_IDX + 1; idx <= last; idx++ )); do
-      report_error "${designations[idx]}" "$wstatus" /dev/null /dev/null \
-        "turbo worker aborted before this test ran"
-    done
+    RUN_IDX="$last"
+    return 0
+  elif [[ -n "$REPORT_BAD" ]]; then
+    report_error "$suite" "$wstatus" /dev/null /dev/null "unexpected worker report: $REPORT_BAD"
   fi
+  report_unreported "$last" "$wstatus" "turbo worker aborted before this test ran"
+}
+
+# Reads worker reports from stdin: the setup token once, then "INDEX SECONDS" per
+# finished case, in order. Per report: progress line and error report from the
+# case's .out/.err/.status files. $1 setup token, $2 1 = print captured output
+# (worker suites with -v). Uses REPORT_DESIGNATIONS and REPORT_BASES (by index).
+# Sets REPORT_SETUP (1 once the token was read) and REPORT_BAD (unexpected line).
+REPORT_DESIGNATIONS=()
+REPORT_BASES=()
+REPORT_SETUP=0
+REPORT_BAD=""
+read_worker_reports() {
+  local token="$1" show="$2" line got dt status out err st desc
+  REPORT_SETUP=0
+  REPORT_BAD=""
+  while IFS= read -r line; do
+    if [[ "$REPORT_SETUP" -eq 0 && "$line" == "$token" ]]; then
+      REPORT_SETUP=1
+      continue
+    fi
+    got="${line%% *}"
+    dt="${line#* }"
+    if [[ "$REPORT_SETUP" -eq 0 || "$line" != *' '* || "$got" != "$((RUN_IDX + 1))" \
+          || ! "$dt" =~ ^[0-9]+(\.[0-9]+)?$ || -z "${REPORT_BASES[got]:-}" ]]; then
+      REPORT_BAD="$line"
+      break
+    fi
+    RUN_IDX="$got"
+    out="$TMPDIR/${REPORT_BASES[got]}.out"
+    err="$TMPDIR/${REPORT_BASES[got]}.err"
+    st="$TMPDIR/${REPORT_BASES[got]}.status"
+    status="$(<"$st")"
+    if [[ "$show" -eq 1 ]]; then
+      cat "$out"
+      cat "$err" >&2
+    fi
+    extract_description_from_stdout "$out" desc
+    print_progress "S" "$RUN_IDX" "$TOTAL_TESTS" "${REPORT_DESIGNATIONS[got]}" "$dt" "$desc"
+    if [[ -s "$err" || "$status" -ne 0 ]]; then
+      report_error "${REPORT_DESIGNATIONS[got]}" "$status" "$out" "$err"
+    fi
+  done
+}
+
+# Reports the cases after RUN_IDX up to $1 as not run, then sets RUN_IDX to $1.
+# $2 worker status, $3 hint.
+report_unreported() {
+  local last="$1" idx
+  for (( idx = RUN_IDX + 1; idx <= last; idx++ )); do
+    report_error "${REPORT_DESIGNATIONS[idx]}" "$2" /dev/null /dev/null "$3"
+  done
   RUN_IDX="$last"
+}
+
+# Worker suite: started once with KNOCKOUT_WORKER=1, cases on stdin as
+# "INDEX<TAB>PREFIX<TAB>LINE", reports on stdout (see "Worker testsuites" above).
+run_worker_suite() {
+  local suite="$1"
+  local suite_lines="${SUITE_LINES_FILE[$suite]}"
+  local sbase cases wst werr tmp
+  sanitize_name "$suite" sbase
+  cases="$TMPDIR/${sbase}.cases"
+  wst="$TMPDIR/${sbase}.worker-status"
+  werr="$TMPDIR/${sbase}.worker.err"
+  tmp="$TMPDIR"
+  [[ "$tmp" == /* ]] || tmp="$PWD/$tmp"
+
+  REPORT_DESIGNATIONS=()
+  REPORT_BASES=()
+  local line idx="$RUN_IDX"
+  local first=$((RUN_IDX + 1))
+  {
+    while IFS= read -r line; do
+      [[ -z "${line//[[:space:]]/}" ]] && continue
+      parse_suite_line "$line"
+      idx=$((idx + 1))
+      suite_case_designation "$suite" "${PARSED_ARGS[@]}"
+      REPORT_DESIGNATIONS[idx]="$CASE_DESIGNATION"
+      sanitize_name "$CASE_DESIGNATION" "REPORT_BASES[$idx]"
+      printf '%s\t%s\t%s\n' "$idx" "$tmp/${REPORT_BASES[idx]}" "$line"
+    done <"$suite_lines"
+  } >"$cases"
+  local last="$idx"
+  [[ "$last" -ge "$first" ]] || return 0
+
+  read_worker_reports '#!worker' "$V_PASS" < <(
+    rc=0
+    if [[ -x "$suite" ]]; then
+      KNOCKOUT_WORKER=1 "$suite" <"$cases" 2>"$werr" || rc=$?
+    else
+      KNOCKOUT_WORKER=1 bash "$suite" <"$cases" 2>"$werr" || rc=$?
+    fi
+    printf '%s\n' "$rc" >"$wst"
+  )
+  wait "$!" || true
+
+  local wstatus
+  wstatus="$(cat "$wst" 2>/dev/null || printf '?')"
+  if [[ -n "$REPORT_BAD" ]]; then
+    report_error "$suite" "$wstatus" /dev/null "$werr" "unexpected worker report: $REPORT_BAD"
+  elif [[ "$REPORT_SETUP" -eq 0 ]]; then
+    report_error "$suite" "$wstatus" /dev/null "$werr" \
+      "worker suite printed no \"#!worker\" line; its $((last - first + 1)) tests were not run"
+    RUN_IDX="$last"
+    return 0
+  elif [[ "$wstatus" != 0 || -s "$werr" || "$RUN_IDX" -lt "$last" ]]; then
+    report_error "$suite" "$wstatus" /dev/null "$werr" \
+      'worker suite must report every test, write no stderr and exit 0'
+  fi
+  report_unreported "$last" "$wstatus" "worker aborted before this test ran"
 }
 
 phase_R() {
@@ -742,6 +988,8 @@ phase_R() {
   for f in "${FILES[@]}"; do
     if is_turbo "$f"; then
       run_turbo_suite "$f"
+    elif is_worker "$f"; then
+      run_worker_suite "$f"
     elif is_suite "$f"; then
       run_suite "$f"
     else
@@ -785,6 +1033,9 @@ main() {
       [[ "$#" -eq 0 ]] || usage
       print_fn_suite
       exit 0
+      ;;
+    python3-unittest)
+      exec python3 -c "$(print_python3_unittest)" "$@"
       ;;
     run) ;;
     *)

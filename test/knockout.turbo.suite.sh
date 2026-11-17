@@ -563,8 +563,8 @@ write_fn_suite() {
 }
 
 normalize_run() {
-  # Strip timings and the suite file name so forked and turbo runs compare equal.
-  sed -E 's/  [0-9]+\.[0-9]+s/  Ns/; s#[^ ]*/s\.(turbo\.)?suite\.sh#SUITE#g' "$1"
+  # Strip timings and the suite file name so forked, turbo and worker runs compare equal.
+  sed -E 's/  [0-9]+\.[0-9]+s/  Ns/; s#[^ ]*/s\.(turbo\.|worker\.)?suite\.sh#SUITE#g' "$1"
 }
 
 t_unit_turbo_matches_forked() {
@@ -635,6 +635,200 @@ BODY
   assert_contains "$d/out" "[T 3/3] $d/after.sh" || return
 }
 
+# Prints a bash worker loop for fixture suites: with KNOCKOUT_WORKER=1 it runs
+# each case line in a subshell, writes PREFIX.out/.err/.status, reports "IDX 0.001".
+worker_loop() {
+  cat <<'LOOP'
+if [[ "${KNOCKOUT_WORKER:-}" == 1 ]]; then
+  echo "#!worker"
+  while IFS=$'\t' read -r idx prefix line; do
+    eval "args=($line)"
+    st=0
+    ( "t_${args[0]}" "${args[@]:1}" ) </dev/null >"$prefix.out" 2>"$prefix.err" || st=$?
+    echo "$st" >"$prefix.status"
+    echo "$idx 0.001"
+  done
+  exit 0
+fi
+LOOP
+}
+
+t_unit_worker_matches_forked() {
+  echo "# worker suite reports exactly like a forked suite"
+  local d body
+  case_dir worker-golden; d="$CASE_DIR"
+  read -r -d '' body <<'BODY' || true
+t_pass() { echo "# passes"; echo "args: $*"; }
+t_fail() { echo "# fails"; echo "boom" >&2; }
+t_spaces() { echo "# spaces"; [[ "$1" == "a b" && "$2" == "c" ]]; }
+t_status() { echo "# status"; return 3; }
+if (( $# == 0 )) && [[ -z "${KNOCKOUT_WORKER:-}" ]]; then
+  printf '#!testsuite\npass x\nfail\nspaces "a b" c\nstatus\n'; exit 88
+fi
+BODY
+  body+=$'\n'"$(worker_loop)"
+  write_fn_suite "$d/s.suite.sh" <<<"$body"
+  write_fn_suite "$d/s.worker.suite.sh" <<<"$body"
+
+  run_unit "$d/f.out" "$d/f.err" "$d/s.suite.sh"
+  local forked_status="$KO_RC"
+  run_unit "$d/w.out" "$d/w.err" "$d/s.worker.suite.sh"
+  assert_eq "1" "$forked_status" "suite with failures should fail" || return
+  assert_eq "$forked_status" "$KO_RC" "worker exit status should match forked" || return
+  assert_eq "$(normalize_run "$d/f.out")" "$(normalize_run "$d/w.out")" "worker stdout should match forked" || return
+  assert_eq "$(normalize_run "$d/f.err")" "$(normalize_run "$d/w.err")" "worker error report should match forked" || return
+  assert_contains "$d/w.out" "[S 3/4] $d/s.worker.suite.sh::spaces (a\\ b c)  0.001s  -- spaces" || return
+}
+
+t_unit_worker_gets_cases_on_stdin() {
+  echo "# worker suite gets KNOCKOUT_WORKER=1 and INDEX<TAB>PREFIX<TAB>LINE on stdin"
+  local d
+  case_dir worker-stdin; d="$CASE_DIR"
+  printf 'echo ok\n' >"$d/a.sh"
+  write_fn_suite "$d/w.worker.suite.sh" <<'BODY'
+t_one() { echo "# one"; }
+t_two() { echo "# two"; }
+if [[ "${KNOCKOUT_WORKER:-}" == 1 ]]; then
+  echo "#!worker"
+  while IFS= read -r line; do
+    printf '%s\n' "$line" >>"$(dirname "$0")/seen"
+    idx="${line%%$'\t'*}" rest="${line#*$'\t'}"
+    prefix="${rest%%$'\t'*}"
+    : >"$prefix.out"; : >"$prefix.err"; echo 0 >"$prefix.status"
+    echo "$idx 0.001"
+  done
+  exit 0
+fi
+if (( $# == 0 )); then printf '#!testsuite\none\ntwo\tx y\n'; exit 88; fi
+BODY
+
+  run_unit "$d/out" "$d/err" "$d/a.sh" "$d/w.worker.suite.sh"
+  assert_eq "0" "$KO_RC" "worker run should pass" || return
+  assert_file_empty "$d/err" || return
+  assert_eq "2" "$(wc -l <"$d/seen")" "one stdin line per case" || return
+  assert_eq "2" "$(cut -f1 "$d/seen" | head -1)" "index continues the shared counter" || return
+  assert_eq "/" "$(cut -f2 "$d/seen" | head -1 | cut -c1)" "prefix should be absolute" || return
+  assert_eq "one" "$(cut -f3- "$d/seen" | head -1)" "line should be passed verbatim" || return
+  assert_eq $'two\tx y' "$(cut -f3- "$d/seen" | tail -1)" "TABs in the line should be kept" || return
+  assert_contains "$d/out" "[S 3/3] $d/w.worker.suite.sh::two (x\\ y)  0.001s" || return
+}
+
+t_unit_worker_setup_failure() {
+  echo "# worker suite without #!worker line skips its tests"
+  local d
+  case_dir worker-setup-fail; d="$CASE_DIR"
+  write_fn_suite "$d/bad.worker.suite.sh" <<'BODY'
+t_one() { echo "# one"; }
+t_two() { echo "# two"; }
+[[ -z "${KNOCKOUT_WORKER:-}" ]] || { echo "setup broke" >&2; exit 4; }
+BODY
+  printf 'echo ok\n' >"$d/after.sh"
+
+  run_unit "$d/out" "$d/err" "$d/bad.worker.suite.sh" "$d/after.sh"
+  assert_eq "1" "$KO_RC" "setup failure should fail the run" || return
+  assert_contains "$d/err" 'hint: worker suite printed no "#!worker" line; its 2 tests were not run' || return
+  assert_contains "$d/err" "status: 4" || return
+  assert_contains "$d/err" "setup broke" || return
+  assert_not_contains "$d/out" "::one" || return
+  assert_contains "$d/out" "[T 3/3] $d/after.sh" || return
+}
+
+t_unit_worker_aborts_early() {
+  echo "# worker suite that stops early reports the rest as not run"
+  local d
+  case_dir worker-abort; d="$CASE_DIR"
+  write_fn_suite "$d/w.worker.suite.sh" <<BODY
+t_one() { echo "# one"; }
+t_two() { echo "# two"; }
+t_three() { echo "# three"; exit 1; }
+t_after() { echo "# after"; }
+$(worker_loop | sed 's/^    echo "\$idx 0.001"$/&; [[ "\$st" -eq 0 ]] || exit 1/')
+BODY
+
+  run_unit "$d/out" "$d/err" "$d/w.worker.suite.sh"
+  assert_eq "1" "$KO_RC" "aborted worker should fail the run" || return
+  assert_contains "$d/out" "[S 1/4] $d/w.worker.suite.sh::after" || return
+  assert_contains "$d/out" "[S 3/4] $d/w.worker.suite.sh::three" || return
+  assert_contains "$d/err" "hint: worker suite must report every test, write no stderr and exit 0" || return
+  assert_contains "$d/err" "test: $d/w.worker.suite.sh::two" || return
+  assert_contains "$d/err" "hint: worker aborted before this test ran" || return
+}
+
+t_unit_worker_stderr_fails_suite() {
+  echo "# worker suite stderr fails the suite file"
+  local d
+  case_dir worker-stderr; d="$CASE_DIR"
+  write_fn_suite "$d/w.worker.suite.sh" <<BODY
+t_one() { echo "# one"; }
+[[ -z "\${KNOCKOUT_WORKER:-}" ]] || echo "worker noise" >&2
+$(worker_loop)
+BODY
+
+  run_unit "$d/out" "$d/err" "$d/w.worker.suite.sh"
+  assert_eq "1" "$KO_RC" "worker stderr should fail the run" || return
+  assert_contains "$d/out" "[S 1/1] $d/w.worker.suite.sh::one" || return
+  assert_contains "$d/err" "test: $d/w.worker.suite.sh" || return
+  assert_contains "$d/err" "worker noise" || return
+}
+
+t_unit_worker_unexpected_report() {
+  echo "# worker suite with an unexpected report line fails"
+  local d
+  case_dir worker-bad-report; d="$CASE_DIR"
+  write_fn_suite "$d/w.worker.suite.sh" <<BODY
+t_one() { echo "# one"; }
+t_two() { echo "# two"; }
+$(worker_loop | sed 's/^  echo "#!worker"$/&; echo "stray output"/')
+BODY
+
+  run_unit "$d/out" "$d/err" "$d/w.worker.suite.sh"
+  assert_eq "1" "$KO_RC" "unexpected report should fail the run" || return
+  assert_contains "$d/err" "hint: unexpected worker report: stray output" || return
+  assert_contains "$d/err" "test: $d/w.worker.suite.sh::one" || return
+  assert_not_contains "$d/out" "::one" || return
+}
+
+t_unit_python3_unittest_worker() {
+  echo "# knockout python3-unittest runs unittest tests as a worker suite"
+  local d s
+  case_dir py-unittest; d="$CASE_DIR"
+  mkdir -p "$d/proj/tests" "$d/proj/knockout-tests"
+  printf 'def twice(x):\n    return 2 * x\n' >"$d/proj/mod.py"
+  : >"$d/proj/tests/__init__.py"
+  cat >"$d/proj/tests/test_mod.py" <<'PYTEST'
+import unittest
+
+import mod
+
+
+class ModTest(unittest.TestCase):
+    def test_a_pass(self):
+        """twice doubles"""
+        self.assertEqual(mod.twice(2), 4)
+
+    def test_b_fail(self):
+        self.assertEqual(mod.twice(2), 5)
+
+    @unittest.skip("not now")
+    def test_c_skip(self):
+        pass
+PYTEST
+  printf '%s\n' 'cd "$(dirname "$0")/.." && exec knockout python3-unittest discover -s tests -t . "$@"' \
+    >"$d/proj/knockout-tests/u.worker.suite.sh"
+
+  run_unit "$d/out" "$d/err" "$d/proj/knockout-tests"
+  s="$d/proj/knockout-tests/u.worker.suite.sh::tests.test_mod.ModTest"
+  assert_eq "1" "$KO_RC" "failing unittest should fail the run" || return
+  assert_contains "$d/out" "[S 1/3] ${s}.test_a_pass" || return
+  assert_contains "$d/out" "-- twice doubles" || return
+  assert_contains "$d/out" "[S 3/3] ${s}.test_c_skip" || return
+  assert_contains "$d/err" "test: ${s}.test_b_fail" || return
+  assert_contains "$d/err" "AssertionError: 4 != 5" || return
+  assert_not_contains "$d/err" "test_a_pass" || return
+  assert_not_contains "$d/err" "test_c_skip" || return
+  assert_eq "" "$(find "$d/proj" -name __pycache__)" "no bytecode should be written" || return
+}
+
 t_unit_suite_cases_get_empty_stdin() {
   echo "# suite cases get empty stdin (forked and turbo)"
   local d f
@@ -653,7 +847,7 @@ BODY
 }
 
 t_int_commands() {
-  echo "# ko equals ko run; a file argument is an unknown command; -d needs a dir"
+  echo "# ko equals ko run; a file argument is an unknown command; -d needs a dir; python3-unittest usage"
   local d here
   case_dir commands; d="$CASE_DIR"
   mkdir -p "$d/proj/knockout-tests"
@@ -669,6 +863,10 @@ t_int_commands() {
   local file_rc="$KO_RC"
   run_ko "$d/missing.out" "$d/missing.err" -d nope
   local missing_rc="$KO_RC"
+  run_ko "$d/py1.out" "$d/py1.err" python3-unittest
+  local py1_rc="$KO_RC"
+  run_ko "$d/py2.out" "$d/py2.err" python3-unittest discover -x y
+  local py2_rc="$KO_RC"
   cd "$here"
 
   assert_eq "0 0" "$bare_rc $run_rc" "ko and ko run should pass" || return
@@ -678,6 +876,9 @@ t_int_commands() {
   assert_contains "$d/file.err" "usage:" || return
   assert_eq "1" "$missing_rc" "missing -d dir should fail" || return
   assert_contains "$d/missing.err" "die: path not found: nope" || return
+  assert_eq "1 1" "$py1_rc $py2_rc" "python3-unittest without discover or with unknown option should fail" || return
+  assert_contains "$d/py1.err" "usage: knockout python3-unittest discover" || return
+  assert_contains "$d/py2.err" "usage: knockout python3-unittest discover" || return
 }
 
 # --- unit tests of single functions ---
