@@ -3,6 +3,11 @@
 Rules for working on knockout (`ko`), a small Bash test runner. They record decisions already made;
 follow them unless the user decides otherwise.
 
+## Governance
+
+- If there are findings unreleated to the current objective, add it to
+  TODO.md
+
 ## Source of truth
 
 - The header comment of `bin/knockout` is the **canonical generation prompt**. It is authoritative
