@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Example knockout testsuite: run with `knockout examples/example-suite.sh`.
 set -euo pipefail
-# shellcheck source=../lib/testsuite.sh
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/testsuite.sh"
+source <(knockout fn-suite)
 
 t_test() {
   echo "# basic test example"

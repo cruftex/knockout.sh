@@ -8,6 +8,7 @@ generator* and emit a list of further test invocations.
 
 ```bash
 ./install.sh          # symlinks bin/knockout to ~/.local/bin/knockout and ~/.local/bin/ko
+                      # (bin/knockout is self-contained; copying it works too)
 ```
 
 ## Usage
@@ -47,12 +48,14 @@ cases.
 
 ### Writing suites in Bash
 
-`lib/testsuite.sh` implements the protocol for `t_*` functions:
+`knockout fn-suite` prints a handler implementing the protocol for `t_*`
+functions. Source it straight from the runner, so there is no library file to
+install or locate:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/testsuite.sh"
+source <(knockout fn-suite)
 
 t_hello() { echo "# says hello"; echo "hello $*"; }
 
@@ -60,7 +63,10 @@ testsuite_main "$@"
 ```
 
 Run without arguments, the script lists its tests and exits 88. Run with a
-test name, it calls that function (leading `--options` are skipped). See
+test name, it calls that function (leading `--options` are skipped).
+`TESTSUITE_PREFIX` overrides the `t_` prefix. When run by knockout, the
+runner's own directory is put first on `PATH`, so a suite always gets the
+handler of the knockout running it, even when knockout is not installed. See
 `examples/example-suite.sh`.
 
 ## Development

@@ -403,6 +403,47 @@ SCRIPT
   assert_not_contains "$out" "[S 2/2]" || return
 }
 
+test_fn_suite_prints_handler() {
+  local dir out err
+  dir="$(case_dir fn-suite-print)"
+  out="$dir/out"
+  err="$dir/err"
+
+  run_ko "$out" "$err" fn-suite
+  assert_eq "0" "$RUN_STATUS" "fn-suite should exit 0" || return
+  assert_file_empty "$err" || return
+  bash -n "$out" || { fail_msg "fn-suite output is not valid bash"; return 1; }
+  # shellcheck disable=SC1090
+  (source "$out" && declare -F testsuite_main >/dev/null) \
+    || { fail_msg "fn-suite output does not define testsuite_main"; return 1; }
+}
+
+test_fn_suite_sourced_by_suite_without_install() {
+  local dir out err suite
+  dir="$(case_dir fn-suite-source)"
+  out="$dir/out"
+  err="$dir/err"
+  suite="$dir/suite.sh"
+
+  cat >"$suite" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+source <(knockout fn-suite)
+t_one() { echo "# first"; }
+t_two() { echo "# second"; }
+t_three() { echo "# third"; }
+testsuite_main "$@"
+SCRIPT
+  make_executable "$suite"
+
+  # Minimal PATH without any installed knockout: runner must provide itself.
+  PATH="/usr/bin:/bin" run_ko "$out" "$err" "$suite"
+  assert_eq "0" "$RUN_STATUS" "suite sourcing fn-suite should pass" || return
+  assert_file_empty "$err" || return
+  assert_contains "$out" "[S 3/3]" || return
+  assert_contains "$out" "-- third" || return
+}
+
 if [[ ! -x "$KO_UNDER_TEST" ]]; then
   printf 'ko under test is not executable: %s\n' "$KO_UNDER_TEST" >&2
   exit 2
@@ -420,6 +461,8 @@ run_case "-v passes through stdout" test_verbose_passes_through_stdout
 run_case "testsuite generated cases support shell and tab parsing" test_testsuite_runs_generated_cases
 
 run_case "testsuite description lines are ignored" test_testsuite_description_lines_are_ignored
+run_case "fn-suite prints a sourceable handler" test_fn_suite_prints_handler
+run_case "suite sources fn-suite from the running knockout" test_fn_suite_sourced_by_suite_without_install
 
 printf '\nsummary: %d passed, %d failed, %d xfailed, %d xpassed\n' \
   "$PASS_COUNT" "$FAIL_COUNT" "$XFAIL_COUNT" "$XPASS_COUNT"
