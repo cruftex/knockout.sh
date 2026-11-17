@@ -3,6 +3,7 @@
 A small Bash test runner. Tests are plain programs: exit status 0 and empty
 stderr means pass, anything else fails. A test can also act as a *testsuite
 generator* and emit a list of further test invocations.
+See [Writing tests](#writing-tests) to get started.
 
 ## Install
 
@@ -10,6 +11,84 @@ generator* and emit a list of further test invocations.
 ./install.sh          # copies bin/knockout to ~/.local/bin/knockout, ko -> knockout
 PREFIX=/usr/local ./install.sh   # install elsewhere; rerun to update
 ```
+
+## Writing tests
+
+### What a test is
+
+A test is any runnable program: an executable file in any language, or a
+non-executable `*.sh` file (run via `bash`).
+
+- It **passes** when it exits with status 0 **and** writes nothing to stderr.
+- Anything else **fails**: a non-zero exit status, or any stderr output, even
+  with status 0. knockout then prints the test's stdout, stderr and status.
+- Stdout is free for logging; it is captured and shown on failure (or always
+  with `-v`). If the first stdout line starts with `# `, the rest of that line
+  is shown as the test description.
+
+### Where tests live
+
+Put tests in a directory named `knockout-tests/`, or mark any directory with an
+empty `.knockout-tests` file:
+
+```bash
+mkdir -p test && touch test/.knockout-tests
+```
+
+`ko` finds these test directories anywhere below the current directory (hidden
+directories are skipped). Only the files directly inside a test directory are
+tests, and each one must be runnable (executable, or `*.sh`): anything else
+stops the run. Subdirectories of a test directory are not run, unless they are
+marked as test directories themselves, so put helpers and fixtures there (e.g.
+`test/lib/`).
+
+### A simple test
+
+`test/greeting-test.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+echo "# greeting says hello"
+out="$(echo hello)"          # replace with the command under test
+[[ $out == hello ]] || { echo "expected hello, got: $out" >&2; exit 1; }
+```
+
+```
+$ ko
+[T 1/1] test/greeting-test.sh  0.003s  -- greeting says hello
+```
+
+If the check fails, the test reports why on stderr and exits non-zero:
+
+```
+[T 1/1] test/greeting-test.sh  0.003s  -- greeting says hello
+ERROR
+test: test/greeting-test.sh
+status: 1
+--- stdout ---
+# greeting says hello
+--- stderr ---
+expected hello, got: hallo
+```
+
+To run a single test, call it directly: `bash test/greeting-test.sh`.
+
+### Many tests in one file
+
+A Bash file named `*.suite.sh` that defines `t_*` functions gives one test per
+function; see [Writing suites in Bash](#writing-suites-in-bash). Suites in
+other languages implement the [testsuite protocol](#testsuite-protocol).
+
+### Tips
+
+- Tests run in the caller's current directory; knockout does not `cd`. Resolve
+  paths from the test file, e.g. `here="$(dirname "$0")"`.
+- Any stderr output fails a test. Redirect expected noise (`2>/dev/null`), or
+  capture it and check it.
+- Let a failing check exit non-zero and say on stderr what went wrong.
+- Naming is strict: suites are named `*.suite` or `*.suite.*`; plain tests must
+  not be.
 
 ## Usage
 
@@ -31,8 +110,6 @@ knockout fn-suite           # print the bash t_* suite handler
   Anything else is a fatal error.
 - `-v` passes test stdout through. `-k` keeps the `.out`/`.err`/`.status`
   files of each test for inspection.
-- If the first stdout line starts with `# `, it is shown as the test
-  description.
 
 Progress output:
 
