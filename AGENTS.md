@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rules for working on knockout (`ko`), a small Bash test runner. They record decisions already made;
+Rules for working on knockout.sh, a small Bash test runner. They record decisions already made;
 follow them unless the user decides otherwise.
 
 ## Governance
@@ -10,7 +10,7 @@ follow them unless the user decides otherwise.
 
 ## Source of truth
 
-- The header comment of `bin/knockout` is the **canonical generation prompt**. It is authoritative
+- The header comment of `bin/knockout.sh` is the **canonical generation prompt**. It is authoritative
   for behavior and is kept verbatim: never reword, reorder or "tidy" it on your own.
 - Behavior changes start with the prompt. Draft the new or changed prompt text, get the user's OK,
   then implement code and prompt together.
@@ -24,11 +24,11 @@ follow them unless the user decides otherwise.
   git-root lookup and no `cd`.
 - **Strict conventions over guessing.** Example: suites are recognized by file name only. A misnamed
   suite is a failure with a hint, not silently detected.
-- **One self-contained file.** `bin/knockout` has no library files and no install location. Anything
-  that suites need is emitted by knockout itself (`knockout fn-suite`).
+- **One self-contained file.** `bin/knockout.sh` has no library files and no install location. Anything
+  that suites need is emitted by knockout.sh itself (`knockout.sh fn-suite`).
 - **Positional arguments are commands** (`run`, the default, `fn-suite` and `python3-unittest`); anything else is an
   error. Tests are selected by directory (`-d <dir>`, repeatable) or by discovery. A single test is
-  run by calling it directly, never through `ko`.
+  run by calling it directly, never through `knockout.sh`.
 
 ## Conventions
 
@@ -37,13 +37,13 @@ follow them unless the user decides otherwise.
 | Testsuite | name ends in `.suite` or contains `.suite.` (`x.suite`, `x.suite.sh`, `x.suite.py`); any runnable file |
 | Turbo suite | `*.turbo.suite.sh`: bash fn-suite, sourced once, each case runs in a subshell |
 | Worker suite | `*.worker.suite*`: any language; started once with `KNOCKOUT_WORKER=1`, cases on stdin, reports on stdout (protocol in the header) |
-| Bash suite | `source <(knockout fn-suite)`, `t_*` functions, last line `testsuite_main "$@"` |
+| Bash suite | `source <(knockout.sh fn-suite)`, `t_*` functions, last line `testsuite_main "$@"` |
 | Skip | exit 77 with no stderr: `SKIP`, not a failure |
-| Python worker | `knockout python3-unittest discover …`: stderr is **not** a failure, unittest decides |
+| Python worker | `knockout.sh python3-unittest discover …`: stderr is **not** a failure, unittest decides |
 | Test description | first stdout line starting with `# ` |
 | Test directories | a `knockout-tests/` dir, or an empty `.knockout-tests` marker in any dir |
-| `ko` = `ko run` | runs all test dirs below the cwd (hidden dirs skipped, sorted) |
-| `ko -d <dir>` | runs only the given dir(s), non-recursive; `-v` pass-through, `-k` keep tmpdir |
+| `knockout.sh` = `knockout.sh run` | runs all test dirs below the cwd (hidden dirs skipped, sorted) |
+| `knockout.sh -d <dir>` | runs only the given dir(s), non-recursive; `-v` pass-through, `-k` keep tmpdir |
 
 ## Shell rules (from the prompt, project wide)
 
@@ -68,31 +68,31 @@ follow them unless the user decides otherwise.
   order with one shared counter.
 - Suite cases get `/dev/null` as stdin (forked and turbo alike).
 - Turbo suites must report exactly like forked ones. Only the speed may differ.
-- `bin/knockout` is sourceable: when sourced it only defines functions and defaults; `main` runs only
+- `bin/knockout.sh` is sourceable: when sourced it only defines functions and defaults; `main` runs only
   when executed.
 
 ## Tests
 
 - **Layout:**
-  - `test/knockout.turbo.suite.sh`: the self-test suite. `t_unit_*` source the knockout under test
+  - `test/knockout.turbo.suite.sh`: the self-test suite. `t_unit_*` source the knockout.sh under test
     and call its functions (`init_run DIR` + `run_paths …` for whole runs). `t_int_*` run the
     complete script; keep these few.
   - `test/knockout-test.sh`: a second, independent run of the same `t_*` functions. It stubs
-    `knockout` and `testsuite_main` as no-ops, so no knockout code acts as harness.
-- **Implementation under test:** by default the knockout that runs the suite. Test another one with
-  `KO_UNDER_TEST=/path/to/knockout ko -d test`. The copy must be named `knockout`.
+    `knockout.sh` and `testsuite_main` as no-ops, so no knockout.sh code acts as harness.
+- **Implementation under test:** by default the knockout.sh that runs the suite. Test another one with
+  `KO_UNDER_TEST=/path/to/knockout.sh knockout.sh -d test`. The copy must be named `knockout.sh`.
 - **Every case cleans up after itself:** use `case_dir NAME; d="$CASE_DIR"`. Never use
   `d="$(case_dir …)"`, because the subshell would remove the dir immediately.
 - **Never run the complete script without arguments from the repo.** It would find the repo's own
   tests and recurse. `cd` into an empty case dir first.
 - **Fixture suites:** when a test needs a throwaway bash suite as test data, create it with
   `write_fn_suite PATH <<'BODY' … BODY`. It pastes the fn-suite handler into the file (from
-  `print_fn_suite` of the sourced knockout) instead of writing `source <(knockout fn-suite)`, which
-  would start a knockout process on every listing and case. The real `source <(knockout fn-suite)`
+  `print_fn_suite` of the sourced knockout.sh) instead of writing `source <(knockout.sh fn-suite)`, which
+  would start a knockout.sh process on every listing and case. The real `source <(knockout.sh fn-suite)`
   line is covered once, by `t_int_fn_suite_sourced_by_suite_without_install`; keep that test using it.
 - **Prove that a new test can fail** (break the code in a scratch copy, not in the repo), and check
   that no `ko-test.*` dirs are left behind.
-- **Done means:** `env PATH=/usr/bin:/bin make test` passes, which proves it works with no knockout
+- **Done means:** `env PATH=/usr/bin:/bin make test` passes, which proves it works with no knockout.sh
   installed.
 
 ## Workflow

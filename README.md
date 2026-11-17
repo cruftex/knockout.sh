@@ -1,4 +1,4 @@
-# knockout (`ko`)
+# knockout.sh
 
 A small Bash test runner. Tests are plain programs: exit status 0 and empty
 stderr means pass, anything else fails. A test can also act as a *testsuite
@@ -8,9 +8,15 @@ See [Writing tests](#writing-tests) to get started.
 ## Install
 
 ```bash
-./install.sh          # copies bin/knockout to ~/.local/bin/knockout, ko -> knockout
+./install.sh          # copies bin/knockout.sh to ~/.local/bin/knockout.sh
 PREFIX=/usr/local ./install.sh   # install elsewhere; rerun to update
 ```
+
+The command is `knockout.sh`, the project name, so it doesn't collide with
+other tools. Want a short name? Add your own alias, e.g. `alias kt=knockout.sh`
+(avoid `ko`, which is [ko.build](https://ko.build)'s command). Updating from an
+older version removes the old `knockout` and `ko` from the install directory,
+but only if they are knockout's own.
 
 ## Writing tests
 
@@ -24,7 +30,7 @@ non-executable `*.sh` file (run via `bash`).
   (the automake/meson convention). A skip doesn't fail the run; the progress
   line shows `SKIP`.
 - Anything else **fails**: another non-zero exit status, or any stderr output,
-  even with status 0. knockout then prints the test's stdout, stderr and status.
+  even with status 0. knockout.sh then prints the test's stdout, stderr and status.
 - Stdout is free for logging; it is captured and shown on failure (or always
   with `-v`). If the first stdout line starts with `# `, the rest of that line
   is shown as the test description.
@@ -38,7 +44,7 @@ empty `.knockout-tests` file:
 mkdir -p test && touch test/.knockout-tests
 ```
 
-`ko` finds these test directories anywhere below the current directory (hidden
+`knockout.sh` finds these test directories anywhere below the current directory (hidden
 directories are skipped). Only the files directly inside a test directory are
 tests, and each one must be runnable (executable, or `*.sh`): anything else
 stops the run. Subdirectories of a test directory are not run, unless they are
@@ -58,7 +64,7 @@ out="$(echo hello)"          # replace with the command under test
 ```
 
 ```
-$ ko
+$ knockout.sh
 [T 1/1] test/greeting-test.sh  0.003s  -- greeting says hello
 ```
 
@@ -87,7 +93,7 @@ To run many cases in one process in any language, use a
 
 ### Tips
 
-- Tests run in the caller's current directory; knockout does not `cd`. Resolve
+- Tests run in the caller's current directory; knockout.sh does not `cd`. Resolve
   paths from the test file, e.g. `here="$(dirname "$0")"`.
 - Any stderr output fails a test. Redirect expected noise (`2>/dev/null`), or
   capture it and check it. (Python unittest tests are the exception, see
@@ -100,15 +106,15 @@ To run many cases in one process in any language, use a
 ## Usage
 
 ```bash
-ko                          # = ko run: run the project's tests
-knockout [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...
-knockout fn-suite           # print the bash t_* suite handler
-knockout python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite
+knockout.sh                 # = knockout.sh run: run the project's tests
+knockout.sh [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...
+knockout.sh fn-suite           # print the bash t_* suite handler
+knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite
 ```
 
 - A positional argument is always a command: `run` (the default),
   `fn-suite` or `python3-unittest`. To run a single test, call it directly.
-- Without `-d`, knockout runs every test directory found recursively below
+- Without `-d`, knockout.sh runs every test directory found recursively below
   the current directory: directories named `knockout-tests/`, and
   directories containing an empty marker file `.knockout-tests`
   (e.g. `test/.knockout-tests`). Hidden directories are skipped.
@@ -156,14 +162,14 @@ named as a suite that emits testsuite output (the error hints to rename it).
 
 ### Writing suites in Bash
 
-`knockout fn-suite` prints a handler implementing the protocol for `t_*`
+`knockout.sh fn-suite` prints a handler implementing the protocol for `t_*`
 functions. Source it straight from the runner, so there is no library file to
 install or locate:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-source <(knockout fn-suite)
+source <(knockout.sh fn-suite)
 
 t_hello() { echo "# says hello"; echo "hello $*"; }
 
@@ -172,19 +178,19 @@ testsuite_main "$@"
 
 Run without arguments, the script lists its tests and exits 88. Run with a
 test name, it calls that function (leading `--options` are skipped).
-`TESTSUITE_PREFIX` overrides the `t_` prefix. When run by knockout, the
+`TESTSUITE_PREFIX` overrides the `t_` prefix. When run by knockout.sh, the
 runner's own directory is put first on `PATH`, so a suite always gets the
-handler of the knockout running it, even when knockout is not installed. See
+handler of the knockout.sh running it, even when knockout.sh is not installed. See
 `examples/example.suite.sh`.
 
 ### Turbo suites
 
-Name a Bash fn-suite `*.turbo.suite.sh` and knockout sources it **once** into
+Name a Bash fn-suite `*.turbo.suite.sh` and knockout.sh sources it **once** into
 a worker shell, then runs each case in a subshell (fork, no exec, no
 re-sourcing). That is roughly 10x faster per case: on one machine, 500 trivial
 cases took 1.0s instead of 9.1s.
 
-- The file must be a Bash suite using `source <(knockout fn-suite)`. It stays
+- The file must be a Bash suite using `source <(knockout.sh fn-suite)`. It stays
   a normal suite: listing, running it standalone, and the reports all work as
   for `*.suite.sh`.
 - Cases are still isolated: variables, `cd`, `set` changes and `exit` stay
@@ -201,7 +207,7 @@ cases took 1.0s instead of 9.1s.
 A file named `*.worker.suite` or `*.worker.suite.*` is a testsuite in any
 language that runs all its tests in **one process**, instead of one process
 per case. It lists its tests like any suite, and run with a test name it runs
-that one test. In phase R knockout starts it once with `KNOCKOUT_WORKER=1`:
+that one test. In phase R knockout.sh starts it once with `KNOCKOUT_WORKER=1`:
 
 - **stdin**: one line per test, `INDEX<TAB>PREFIX<TAB>LINE`. `LINE` is the
   suite's own listing line, verbatim (split on the first two TABs only).
@@ -218,10 +224,10 @@ reported as not run.
 
 #### Example: Python unittest
 
-knockout has a built-in worker for Python unittest tests:
-`knockout python3-unittest discover [-s START] [-t TOP]` takes the same
+knockout.sh has a built-in worker for Python unittest tests:
+`knockout.sh python3-unittest discover [-s START] [-t TOP]` takes the same
 arguments as `python3 -m unittest discover`. `examples/python/` is a normal
-Python project with unittest tests; knockout is added with one file:
+Python project with unittest tests; knockout.sh is added with one file:
 
 ```
 examples/python/
@@ -236,19 +242,19 @@ examples/python/
 
 ```bash
 #!/usr/bin/env bash
-# Runs the project's unittest tests with knockout (one process, fork per test).
-cd "$(dirname "$0")/.." && exec knockout python3-unittest discover -s tests -t . "$@"
+# Runs the project's unittest tests with knockout.sh (one process, fork per test).
+cd "$(dirname "$0")/.." && exec knockout.sh python3-unittest discover -s tests -t . "$@"
 ```
 
 It changes to the project root and runs the same discovery as
-`python3 -m unittest discover -s tests -t .` there. `ko` then runs each test as
+`python3 -m unittest discover -s tests -t .` there. `knockout.sh` then runs each test as
 its own case:
 
 ```
 [S 1/3] examples/python/knockout-tests/unittest.worker.suite.sh::tests.test_calc.CalcTest.test_add  0.004s  -- adds two numbers
 ```
 
-> **stderr does not fail a Python test.** Unlike knockout's own rule (any
+> **stderr does not fail a Python test.** Unlike knockout.sh's own rule (any
 > stderr output is a failure), unittest decides pass or fail, exactly as with
 > `python3 -m unittest`. Logging and warnings don't break tests: a test's stdout
 > and stderr both end up in its stdout (`.out`), and `.err` only gets the
@@ -275,4 +281,4 @@ make test
 
 Development and test notes (unit vs. integration tests, testing another
 implementation via `KO_UNDER_TEST`) are part of the canonical prompt in the
-`bin/knockout` header, which is kept verbatim.
+`bin/knockout.sh` header, which is kept verbatim.

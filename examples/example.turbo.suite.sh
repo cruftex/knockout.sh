@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Example knockout testsuite: run directly or with `ko -d examples`.
+# Example knockout testsuite: run directly or with `knockout.sh -d examples`.
 set -euo pipefail
-source <(knockout fn-suite)
+source <(knockout.sh fn-suite)
 
 t_test() {
   echo "# basic test example"

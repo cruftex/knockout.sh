@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# knockout self-test suite. t_unit_* source the knockout under test and call its
-# functions; t_int_* run the complete script. Runs via knockout (`ko`), a second
-# time independently via test/knockout-test.sh, or one case:
+# knockout.sh self-test suite. t_unit_* source the knockout.sh under test and
+# call its functions; t_int_* run the complete script. Runs via knockout.sh, a
+# second time independently via test/knockout-test.sh, or one case:
 #   test/knockout.turbo.suite.sh <name>
-# Tests another implementation with the normal knockout as harness:
-#   KO_UNDER_TEST=/path/to/other ko -d test
+# Tests another implementation with the normal knockout.sh as harness:
+#   KO_UNDER_TEST=/path/to/other/knockout.sh knockout.sh -d test
 set -euo pipefail
-source <(knockout fn-suite)
+source <(knockout.sh fn-suite)
 
 # Implementation under test: the knockout running this suite (first on PATH;
 # knockout puts itself there), or another one via KO_UNDER_TEST. Resolved to an
 # absolute path because tests cd and run with a reduced PATH.
-ko_wanted="${KO_UNDER_TEST:-knockout}"
+ko_wanted="${KO_UNDER_TEST:-knockout.sh}"
 if ! KO_UNDER_TEST="$(type -P "$ko_wanted")"; then
   printf 'knockout under test not found: %s\n' "$ko_wanted" >&2
   exit 2
@@ -19,7 +19,7 @@ fi
 KO_UNDER_TEST="$(readlink -f "$KO_UNDER_TEST")"
 
 # Unit tests call knockout's functions directly.
-# shellcheck source=../bin/knockout
+# shellcheck source=../bin/knockout.sh
 source "$KO_UNDER_TEST"
 
 KO_RC=0
@@ -438,7 +438,7 @@ t_int_fn_suite_sourced_by_suite_without_install() {
   cat >"$suite" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-source <(knockout fn-suite)
+source <(knockout.sh fn-suite)
 t_one() { echo "# first"; }
 t_two() { echo "# second"; }
 t_three() { echo "# third"; }
@@ -556,7 +556,7 @@ t_unit_marker_file_is_not_a_test() {
 write_fn_suite() {
   # $1 path; stdin: body (t_* functions and top-level code). The handler is
   # embedded from the sourced knockout (no knockout process per fixture run);
-  # t_int_fn_suite_sourced_by_suite_without_install covers `knockout fn-suite`.
+  # t_int_fn_suite_sourced_by_suite_without_install covers `knockout.sh fn-suite`.
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
     print_fn_suite
@@ -792,7 +792,7 @@ BODY
 }
 
 t_unit_python3_unittest_worker() {
-  echo "# knockout python3-unittest runs unittest tests as a worker suite"
+  echo "# knockout.sh python3-unittest runs unittest tests as a worker suite"
   local d s
   case_dir py-unittest; d="$CASE_DIR"
   mkdir -p "$d/proj/tests" "$d/proj/knockout-tests"
@@ -843,7 +843,7 @@ class ModTest(unittest.TestCase):
     def test_g_xfail(self):
         self.fail()
 PYTEST
-  printf '%s\n' 'cd "$(dirname "$0")/.." && exec knockout python3-unittest discover -s tests -t . "$@"' \
+  printf '%s\n' 'cd "$(dirname "$0")/.." && exec knockout.sh python3-unittest discover -s tests -t . "$@"' \
     >"$d/proj/knockout-tests/u.worker.suite.sh"
 
   run_unit "$d/out" "$d/err" "$d/proj/knockout-tests"
@@ -968,7 +968,7 @@ t_unit_junit_report() {
   run_unit_reports "$d/out" "$d/err" "$d/t"
   python3 -c 'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])' "$d/r.xml" \
     || { fail_msg "invalid XML: $d/r.xml"; return 1; }
-  assert_contains "$d/r.xml" '<testsuite name="knockout" tests="7" failures="1" errors="3" skipped="1" time="' || return
+  assert_contains "$d/r.xml" '<testsuite name="knockout.sh" tests="7" failures="1" errors="3" skipped="1" time="' || return
   assert_contains "$d/r.xml" "<testcase classname=\"$d/t/a-pass.sh\" name=\"$d/t/a-pass.sh\" time=\"" || return
   assert_contains "$d/r.xml" '<failure message="exit status 3">err &lt;&amp;&quot;&gt; y' || return
   assert_contains "$d/r.xml" '<system-out>out &lt;&amp;&quot;&gt; x' || return
@@ -995,7 +995,7 @@ BODY
 }
 
 t_int_commands() {
-  echo "# ko equals ko run; a file argument is an unknown command; -d needs a dir; python3-unittest usage"
+  echo "# knockout.sh equals knockout.sh run; a file argument is an unknown command; -d needs a dir; python3-unittest usage"
   local d here
   case_dir commands; d="$CASE_DIR"
   mkdir -p "$d/proj/knockout-tests"
@@ -1017,16 +1017,16 @@ t_int_commands() {
   local py2_rc="$KO_RC"
   cd "$here"
 
-  assert_eq "0 0" "$bare_rc $run_rc" "ko and ko run should pass" || return
-  assert_eq "$(normalize_run "$d/bare.out")" "$(normalize_run "$d/run.out")" "ko and ko run should match" || return
+  assert_eq "0 0" "$bare_rc $run_rc" "knockout.sh and knockout.sh run should pass" || return
+  assert_eq "$(normalize_run "$d/bare.out")" "$(normalize_run "$d/run.out")" "knockout.sh and knockout.sh run should match" || return
   assert_eq "1" "$file_rc" "file argument should fail" || return
   assert_contains "$d/file.err" "unknown command: knockout-tests/a.sh" || return
   assert_contains "$d/file.err" "usage:" || return
   assert_eq "1" "$missing_rc" "missing -d dir should fail" || return
   assert_contains "$d/missing.err" "die: path not found: nope" || return
   assert_eq "1 1" "$py1_rc $py2_rc" "python3-unittest without discover or with unknown option should fail" || return
-  assert_contains "$d/py1.err" "usage: knockout python3-unittest discover" || return
-  assert_contains "$d/py2.err" "usage: knockout python3-unittest discover" || return
+  assert_contains "$d/py1.err" "usage: knockout.sh python3-unittest discover" || return
+  assert_contains "$d/py2.err" "usage: knockout.sh python3-unittest discover" || return
 }
 
 # --- unit tests of single functions ---

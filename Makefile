@@ -1,6 +1,6 @@
 .PHONY: test install
 test:
-	bin/knockout
+	bin/knockout.sh
 
 install:
 	./install.sh

@@ -87,7 +87,7 @@ set -euo pipefail
 # - -d <dir> : test directory to run (repeatable); disables project mode
 # - -t <file> : write a TAP version 13 report (ok/not ok per test, "# SKIP",
 #   suite errors as "not ok", plan line "1..N" at the end)
-# - -j <file> : write a JUnit XML report: one <testsuite name="knockout">, one
+# - -j <file> : write a JUnit XML report: one <testsuite name="knockout.sh">, one
 #   <testcase classname="FILE" name="TEST AND ARGS" time="..."> per test, with
 #   <failure> (status and stderr), <error> (not run / suite error, with hint) or
 #   <skipped/>, and <system-out>/<system-err> for failed and skipped tests.
@@ -104,13 +104,19 @@ set -euo pipefail
 # - When sourced, the script only defines its functions and defaults; nothing
 #   runs and no traps are set. When executed, main parses options and runs.
 #
+# Name:
+# - The script and its command are named "knockout.sh", the project name; there
+#   is no other command name. Suites call "knockout.sh fn-suite" and
+#   "knockout.sh python3-unittest". The runner puts its own directory first on
+#   PATH, so these resolve to the running copy, installed or not.
+#
 # Development and tests:
 # - test/knockout.turbo.suite.sh sources the knockout under test (KO_UNDER_TEST,
 #   default: the knockout running the suite) and calls its functions directly
 #   (unit tests). Only a few integration tests run the complete script.
 # - test/knockout-test.sh runs the same t_* functions a second time without
 #   any knockout as harness, so a runner bug cannot hide failing tests.
-# - Testing another implementation: KO_UNDER_TEST=/path/to/knockout ko -d test
+# - Testing another implementation: KO_UNDER_TEST=/path/to/knockout.sh knockout.sh -d test
 #
 # Turbo testsuites:
 # - Files named "*.turbo.suite.sh" are bash fn-suites that are listed like any
@@ -162,7 +168,7 @@ set -euo pipefail
 #   traceback (exit 1). Skipped: "skipped: <reason>" on stdout, exit 77.
 #   Expected failure: "expected failure" on stdout, exit 0.
 # - Usage in a worker testsuite file (e.g. knockout-tests/unittest.worker.suite.sh):
-#     cd "$(dirname "$0")/.." && exec knockout python3-unittest discover -s tests -t . "$@"
+#     cd "$(dirname "$0")/.." && exec knockout.sh python3-unittest discover -s tests -t . "$@"
 #
 # Shell strictness:
 # - Runner uses: set -euo pipefail
@@ -187,7 +193,7 @@ set -euo pipefail
 # However, if not yet prefixed with "# ", add a comment prefix.
 
 # -----------------------------------------------------------------------------
-# CONSOLIDATED GENERATION PROMPT for `knockout fn-suite` (origin: papa-ps testsuite-example.sh)
+# CONSOLIDATED GENERATION PROMPT for `knockout.sh fn-suite` (origin: papa-ps testsuite-example.sh)
 #
 # Bash testsuite runner with the following semantics:
 #
@@ -227,8 +233,8 @@ set -euo pipefail
 print_fn_suite() {
   cat <<'FN_SUITE'
 # shellcheck shell=bash
-# knockout fn-suite: "#!testsuite" protocol for t_* functions.
-# Usage: source <(knockout fn-suite); define t_* functions; end with: testsuite_main "$@"
+# knockout.sh fn-suite: "#!testsuite" protocol for t_* functions.
+# Usage: source <(knockout.sh fn-suite); define t_* functions; end with: testsuite_main "$@"
 # TESTSUITE_PREFIX overrides the "t_" prefix.
 
 # Entrypoint for a testsuite script. Must be called from the script itself.
@@ -277,7 +283,7 @@ testsuite_main() {
 FN_SUITE
 }
 
-# Python code of `knockout python3-unittest`, run with python3 -c (stdin carries
+# Python code of `knockout.sh python3-unittest`, run with python3 -c (stdin carries
 # the worker cases). See "Python unittest worker" above.
 print_python3_unittest() {
   cat <<'PYTHON3_UNITTEST'
@@ -286,7 +292,7 @@ import sys
 import time
 import unittest
 
-USAGE = "usage: knockout python3-unittest discover [-s START] [-t TOP] [TEST_ID]"
+USAGE = "usage: knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]"
 
 
 def parse_args(args):
@@ -400,7 +406,7 @@ PYTHON3_UNITTEST
 
 usage() {
   printf 'usage: %s [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
-  printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout fn-suite)\n' "${0##*/}" >&2
+  printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout.sh fn-suite)\n' "${0##*/}" >&2
   printf '       %s python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite\n' "${0##*/}" >&2
   exit 1
 }
@@ -659,7 +665,7 @@ finish_run() {
   if [[ -n "$JUNIT_FILE" ]]; then
     {
       printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n'
-      printf '  <testsuite name="knockout" tests="%d" failures="%d" errors="%d" skipped="%d" time="%s">\n' \
+      printf '  <testsuite name="knockout.sh" tests="%d" failures="%d" errors="%d" skipped="%d" time="%s">\n' \
         "$REPORT_N" "$COUNT_FAIL" $((COUNT_NOTRUN + COUNT_SUITEERR)) "$COUNT_SKIP" "$secs"
       cat "$TMPDIR/junit.cases"
       printf '  </testsuite>\n</testsuites>\n'
@@ -1248,7 +1254,7 @@ main() {
     done
   fi
 
-  # Tests calling `knockout fn-suite` get this same knockout, installed or not.
+  # Suites calling `knockout.sh fn-suite` get this same knockout.sh, installed or not.
   PATH="$(dirname "$(readlink -f "$0")"):$PATH"
   export PATH
 
