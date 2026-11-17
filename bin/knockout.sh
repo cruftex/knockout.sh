@@ -199,6 +199,10 @@ set -euo pipefail
 #
 # - Tests are bash functions with a configurable prefix (default: "t_")
 #
+# - When the handler is sourced into a suite, it sets TESTSUITE_DIR to the absolute
+#   directory of the suite file (builtins only, no subshell), so a suite can load
+#   the code under test with: source "$TESTSUITE_DIR/../lib.sh"
+#
 # - If the script is *sourced*:
 #     * Do nothing
 #
@@ -236,6 +240,20 @@ print_fn_suite() {
 # knockout.sh fn-suite: "#!testsuite" protocol for t_* functions.
 # Usage: source <(knockout.sh fn-suite); define t_* functions; end with: testsuite_main "$@"
 # TESTSUITE_PREFIX overrides the "t_" prefix.
+# TESTSUITE_DIR: absolute dir of this suite file, e.g. source "$TESTSUITE_DIR/../lib.sh"
+
+# The suite file: the first source that is not this handler's process substitution.
+for __ko_f in "${BASH_SOURCE[@]}"; do
+  [[ "$__ko_f" == /dev/fd/* || "$__ko_f" == /proc/* ]] || break
+done
+if [[ "$__ko_f" == */* ]]; then
+  TESTSUITE_DIR="${__ko_f%/*}"
+  TESTSUITE_DIR="${TESTSUITE_DIR:-/}"
+  [[ "$TESTSUITE_DIR" == /* ]] || TESTSUITE_DIR="$PWD/$TESTSUITE_DIR"
+else
+  TESTSUITE_DIR="$PWD"
+fi
+unset __ko_f
 
 # Entrypoint for a testsuite script. Must be called from the script itself.
 testsuite_main() {

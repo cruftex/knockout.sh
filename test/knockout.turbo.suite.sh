@@ -442,6 +442,7 @@ source <(knockout.sh fn-suite)
 t_one() { echo "# first"; }
 t_two() { echo "# second"; }
 t_three() { echo "# third"; }
+t_dir() { echo "# dir=$TESTSUITE_DIR"; }
 testsuite_main "$@"
 SCRIPT
   make_executable "$suite"
@@ -450,8 +451,10 @@ SCRIPT
   PATH="/usr/bin:/bin" run_ko "$out" "$err" -d "$dir/tests"
   assert_eq "0" "$KO_RC" "suite sourcing fn-suite should pass" || return
   assert_file_empty "$err" || return
-  assert_contains "$out" "[S 3/3]" || return
+  assert_contains "$out" "[S 4/4]" || return
   assert_contains "$out" "-- third" || return
+  assert_contains "$out" "::dir  " || return
+  assert_contains "$out" "-- dir=$dir/tests" || return
 }
 
 t_unit_mixed_run_has_exact_shared_total() {
@@ -859,6 +862,43 @@ PYTEST
   # Exactly the two real failures: fixtures ran, stderr output and xfail don't fail.
   assert_line_count_regex "$d/err" '^test: ' 2 || return
   assert_eq "" "$(find "$d/proj" -name __pycache__)" "no bytecode should be written" || return
+}
+
+t_unit_testsuite_dir() {
+  echo "# TESTSUITE_DIR is the suite's absolute dir (forked, turbo, standalone, any cwd)"
+  local d f here
+  case_dir testsuite-dir; d="$CASE_DIR"
+  mkdir -p "$d/proj/test" "$d/other"
+  printf 'greet() { echo "hello $1"; }\n' >"$d/proj/lib.sh"
+  for f in "$d/proj/test/a.suite.sh" "$d/proj/test/a.turbo.suite.sh"; do
+    write_fn_suite "$f" <<'BODY'
+source "$TESTSUITE_DIR/../lib.sh"
+t_greet() { echo "# dir=$TESTSUITE_DIR"; [[ "$(greet x)" == "hello x" ]]; }
+t_no_leak() { [[ -z "${__ko_f+set}" ]]; }
+BODY
+  done
+
+  here="$PWD"
+  cd "$d"
+  run_unit "$d/out" "$d/err" proj/test
+  cd "$here"
+  assert_eq "0" "$KO_RC" "suites loading lib via TESTSUITE_DIR should pass" || return
+  assert_file_empty "$d/err" || return
+  assert_line_count_regex "$d/out" "::greet  [0-9.]+s  -- dir=$d/proj/test\$" 2 || return
+
+  cd "$d/proj/test"
+  bash a.suite.sh greet >"$d/standalone.out" 2>&1 || true
+  cd "$d/other"
+  bash ../proj/test/a.suite.sh greet >>"$d/standalone.out" 2>&1 || true
+  cd "$here"
+  # Absolute, but not canonical when called via "..": compare resolved dirs.
+  local line n=0
+  while IFS= read -r line; do
+    [[ "$line" == "# dir=/"* ]] || continue
+    assert_eq "$d/proj/test" "$(cd "${line#\# dir=}" && pwd)" "TESTSUITE_DIR should resolve to the suite dir" || return
+    n=$((n + 1))
+  done <"$d/standalone.out"
+  assert_eq "2" "$n" "both standalone runs should print an absolute dir" || return
 }
 
 t_unit_skip_exit_77() {

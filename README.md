@@ -183,6 +183,29 @@ runner's own directory is put first on `PATH`, so a suite always gets the
 handler of the knockout.sh running it, even when knockout.sh is not installed. See
 `examples/example.suite.sh`.
 
+#### Loading the code under test
+
+The handler sets `TESTSUITE_DIR` to the absolute directory of the suite file,
+whatever the current directory or the path the suite was called with. Use it
+to source the script you are testing, instead of computing a root directory:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+source <(knockout.sh fn-suite)
+source "$TESTSUITE_DIR/../update.sh"   # the code under test
+
+t_update_parses_version() { [[ "$(parse_version 1.2)" == 1 ]]; }
+
+testsuite_main "$@"
+```
+
+A forked suite (`*.suite.sh`) runs this preamble for the listing and again for
+every test. If the sourced script only defines functions (no side effects when
+sourced), name the suite `*.turbo.suite.sh` so it runs once per run. With 200
+cases sourcing a small library: 1.97s with a `ROOT=$(cd … && pwd)` line, 1.63s
+with `TESTSUITE_DIR`, and 0.22s as a turbo suite.
+
 ### Turbo suites
 
 Name a Bash fn-suite `*.turbo.suite.sh` and knockout.sh sources it **once** into

@@ -37,7 +37,7 @@ follow them unless the user decides otherwise.
 | Testsuite | name ends in `.suite` or contains `.suite.` (`x.suite`, `x.suite.sh`, `x.suite.py`); any runnable file |
 | Turbo suite | `*.turbo.suite.sh`: bash fn-suite, sourced once, each case runs in a subshell |
 | Worker suite | `*.worker.suite*`: any language; started once with `KNOCKOUT_WORKER=1`, cases on stdin, reports on stdout (protocol in the header) |
-| Bash suite | `source <(knockout.sh fn-suite)`, `t_*` functions, last line `testsuite_main "$@"` |
+| Bash suite | `source <(knockout.sh fn-suite)`, `t_*` functions, last line `testsuite_main "$@"`; load code under test via `"$TESTSUITE_DIR/…"` |
 | Skip | exit 77 with no stderr: `SKIP`, not a failure |
 | Python worker | `knockout.sh python3-unittest discover …`: stderr is **not** a failure, unittest decides |
 | Test description | first stdout line starting with `# ` |
