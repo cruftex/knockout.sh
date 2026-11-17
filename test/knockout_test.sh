@@ -136,10 +136,15 @@ test_usage_without_args() {
   out="$d/out"
   err="$d/err"
 
+  # Empty cwd: project mode must find nothing (and never this repo's tests).
+  local here="$PWD"
+  cd "$d"
   run_ko "$out" "$err"
+  cd "$here"
   assert_eq "1" "$RUN_STATUS" "usage should exit 1" || return
   assert_file_empty "$out" || return
-  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [-v] [-d] <file-or-dir>..." || return
+  assert_contains "$err" "no test dirs found" || return
+  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [-v] [-d] [<file-or-dir>...]" || return
 }
 
 test_executable_success_and_description() {
@@ -500,6 +505,139 @@ test_broken_listing_fails_and_continues() {
   assert_not_contains "$out" "[S " || return
 }
 
+test_project_mode_discovers_test_dirs() {
+  local d out err here
+  d="$(case_dir project-mode)"
+  out="$d/out"
+  err="$d/err"
+  mkdir -p "$d/proj/knockout-tests" "$d/proj/sub" "$d/proj/.hidden/knockout-tests" "$d/proj/plain"
+  printf 'echo a\n' >"$d/proj/knockout-tests/a.sh"
+  : >"$d/proj/sub/.knockout-tests"
+  printf 'echo b\n' >"$d/proj/sub/b.sh"
+  printf 'echo c >&2; exit 1\n' >"$d/proj/.hidden/knockout-tests/c.sh"
+  printf 'echo p >&2; exit 1\n' >"$d/proj/plain/p.sh"
+
+  here="$PWD"
+  cd "$d/proj"
+  run_ko "$out" "$err"
+  cd "$here"
+  assert_eq "0" "$RUN_STATUS" "project mode should pass" || return
+  assert_file_empty "$err" || return
+  assert_contains "$out" "[T 1/2] knockout-tests/a.sh" || return
+  assert_contains "$out" "[T 2/2] sub/b.sh" || return
+  assert_not_contains "$out" ".knockout-tests" || return
+}
+
+test_marker_file_is_not_a_test() {
+  local d out err
+  d="$(case_dir marker-ignored)"
+  out="$d/out"
+  err="$d/err"
+  mkdir -p "$d/t"
+  : >"$d/t/.knockout-tests"
+  printf 'echo ok\n' >"$d/t/ok.sh"
+
+  run_ko "$out" "$err" "$d/t"
+  assert_eq "0" "$RUN_STATUS" "explicit dir with marker should pass" || return
+  assert_file_empty "$err" || return
+  assert_contains "$out" "[T 1/1] $d/t/ok.sh" || return
+}
+
+write_fn_suite() {
+  # $1 path; stdin: body (t_* functions and top-level code)
+  {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\nsource <(knockout fn-suite)\n'
+    cat
+    printf 'testsuite_main "$@"\n'
+  } >"$1"
+}
+
+normalize_run() {
+  # Strip timings and the suite file name so forked and turbo runs compare equal.
+  sed -E 's/  [0-9]+\.[0-9]+s/  Ns/; s#[^ ]*/s\.(turbo\.)?suite\.sh#SUITE#g' "$1"
+}
+
+test_turbo_matches_forked() {
+  local d body
+  d="$(case_dir turbo-golden)"
+  read -r -d '' body <<'BODY' || true
+t_pass() { echo "# passes"; echo "args: $*"; }
+t_fail() { echo "# fails"; echo "boom" >&2; }
+t_spaces() { echo "# spaces"; [[ "$1" == "a b" && "$2" == "c" ]]; }
+t_status() { echo "# status"; return 3; }
+BODY
+  write_fn_suite "$d/s.suite.sh" <<<"$body"
+  write_fn_suite "$d/s.turbo.suite.sh" <<<"$body"
+  # Listing with a spaced argument for t_spaces: override the generated listing.
+  local f
+  for f in "$d/s.suite.sh" "$d/s.turbo.suite.sh"; do
+    sed -i 's/^testsuite_main "\$@"$/if (( $# == 0 )) \&\& [[ "${BASH_SOURCE[0]}" == "$0" ]]; then printf "#!testsuite\\npass x\\nfail\\nspaces \\"a b\\" c\\nstatus\\n"; exit 88; fi\ntestsuite_main "$@"/' "$f"
+  done
+
+  run_ko "$d/f.out" "$d/f.err" "$d/s.suite.sh"
+  local forked_status="$RUN_STATUS"
+  run_ko "$d/t.out" "$d/t.err" "$d/s.turbo.suite.sh"
+  assert_eq "$forked_status" "$RUN_STATUS" "turbo exit status should match forked" || return
+  assert_eq "1" "$RUN_STATUS" "suite with failures should fail" || return
+  assert_eq "$(normalize_run "$d/f.out")" "$(normalize_run "$d/t.out")" "turbo stdout should match forked" || return
+  assert_eq "$(normalize_run "$d/f.err")" "$(normalize_run "$d/t.err")" "turbo error report should match forked" || return
+  assert_contains "$d/t.out" "[S 3/4] $d/s.turbo.suite.sh::spaces (a\\ b c)" || return
+}
+
+test_turbo_isolates_cases() {
+  local d
+  d="$(case_dir turbo-isolation)"
+  write_fn_suite "$d/i.turbo.suite.sh" <<'BODY'
+echo sourced >>"$(dirname "${BASH_SOURCE[0]}")/count"
+t_a_set() { SHARED=changed; cd /; echo "# a"; }
+t_b_check() { echo "# b"; [[ "${SHARED:-unset}" == unset && "$PWD" != / ]]; }
+t_c_exit() { echo "# c"; exit 3; }
+t_d_after() { echo "# d"; }
+BODY
+
+  run_ko "$d/out" "$d/err" "$d/i.turbo.suite.sh"
+  assert_eq "1" "$RUN_STATUS" "exit 3 in one case should fail the run" || return
+  assert_contains "$d/out" "[S 4/4] $d/i.turbo.suite.sh::d_after" || return
+  assert_contains "$d/err" "test: $d/i.turbo.suite.sh::c_exit" || return
+  assert_not_contains "$d/err" "b_check" || return
+  # Sourced once for the listing (phase L) and once by the turbo worker.
+  assert_eq "2" "$(wc -l <"$d/count")" "top-level code should run once per worker, not per case" || return
+}
+
+test_turbo_source_failure() {
+  local d
+  d="$(case_dir turbo-source-fail)"
+  write_fn_suite "$d/bad.turbo.suite.sh" <<'BODY'
+t_one() { echo "# one"; }
+t_two() { echo "# two"; }
+[[ "$#" -eq 0 && "${BASH_SOURCE[0]}" == "$0" ]] || { echo "setup broke" >&2; false; }
+BODY
+  printf 'echo ok\n' >"$d/after.sh"
+
+  run_ko "$d/out" "$d/err" "$d/bad.turbo.suite.sh" "$d/after.sh"
+  assert_eq "1" "$RUN_STATUS" "source failure should fail the run" || return
+  assert_contains "$d/err" "hint: turbo suite failed while being sourced; its 2 tests were not run" || return
+  assert_contains "$d/err" "setup broke" || return
+  assert_not_contains "$d/out" "::one" || return
+  assert_contains "$d/out" "[T 3/3] $d/after.sh" || return
+}
+
+test_suite_cases_get_empty_stdin() {
+  local d f
+  d="$(case_dir suite-stdin)"
+  for f in "$d/a.suite.sh" "$d/a.turbo.suite.sh"; do
+    write_fn_suite "$f" <<'BODY'
+t_one() { echo "# one"; [[ -z "$(cat)" ]] || { echo "stdin not empty" >&2; return 1; }; }
+t_two() { echo "# two"; [[ -z "$(cat)" ]] || { echo "stdin not empty" >&2; return 1; }; }
+BODY
+  done
+
+  run_ko "$d/out" "$d/err" "$d/a.suite.sh" "$d/a.turbo.suite.sh"
+  assert_eq "0" "$RUN_STATUS" "suite cases should read empty stdin" || return
+  assert_file_empty "$d/err" || return
+  assert_contains "$d/out" "[S 4/4]" || return
+}
+
 if [[ ! -x "$KO_UNDER_TEST" ]]; then
   printf 'ko under test is not executable: %s\n' "$KO_UNDER_TEST" >&2
   exit 2
@@ -522,6 +660,12 @@ run_case "suite sources fn-suite from the running knockout" test_fn_suite_source
 run_case "mixed run has exact shared total" test_mixed_run_has_exact_shared_total
 run_case "testsuite output from non-suite name fails with hint" test_unnamed_suite_output_fails_with_hint
 run_case "broken suite listings fail and the run continues" test_broken_listing_fails_and_continues
+run_case "no arguments runs test dirs below cwd" test_project_mode_discovers_test_dirs
+run_case "marker file in a test dir is not a test" test_marker_file_is_not_a_test
+run_case "turbo suite reports exactly like a forked suite" test_turbo_matches_forked
+run_case "turbo suite isolates cases in subshells" test_turbo_isolates_cases
+run_case "turbo suite source failure skips its tests" test_turbo_source_failure
+run_case "suite cases get empty stdin (forked and turbo)" test_suite_cases_get_empty_stdin
 
 printf '\nsummary: %d passed, %d failed, %d xfailed, %d xpassed\n' \
   "$PASS_COUNT" "$FAIL_COUNT" "$XFAIL_COUNT" "$XPASS_COUNT"

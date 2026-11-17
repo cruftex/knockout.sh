@@ -14,9 +14,15 @@ generator* and emit a list of further test invocations.
 ## Usage
 
 ```bash
-knockout [-v] [-d] <file-or-dir>...
+ko                    # run the project's tests (see below)
+knockout [-v] [-d] [<file-or-dir>...]
 ```
 
+- Without file/dir arguments, knockout runs every test directory found
+  recursively below the current directory: directories named
+  `knockout-tests/`, and directories containing an empty marker file
+  `.knockout-tests` (e.g. `test/.knockout-tests`). Hidden directories are
+  skipped.
 - Arguments are files or directories. Directories expand to the files they
   contain (non-recursive).
 - Executable files run directly. Non-executable `*.sh` files run via `bash`.
@@ -75,6 +81,25 @@ test name, it calls that function (leading `--options` are skipped).
 runner's own directory is put first on `PATH`, so a suite always gets the
 handler of the knockout running it, even when knockout is not installed. See
 `examples/example.suite.sh`.
+
+### Turbo suites
+
+Name a Bash fn-suite `*.turbo.suite.sh` and knockout sources it **once** into
+a worker shell, then runs each case in a subshell (fork, no exec, no
+re-sourcing). That is roughly 10x faster per case: on one machine, 500 trivial
+cases took 1.0s instead of 9.1s.
+
+- The file must be a Bash suite using `source <(knockout fn-suite)`. It stays
+  a normal suite: listing, running it standalone, and the reports all work as
+  for `*.suite.sh`.
+- Cases are still isolated: variables, `cd`, `set` changes and `exit` stay
+  inside the case's subshell. Each case runs with the shell options the suite
+  set (e.g. `set -euo pipefail`).
+- Differences from forked suites: top-level code runs once per run rather
+  than once per case (shared setup, but side effects happen once too); `$0`
+  is the worker, not the suite file; stdin is `/dev/null`.
+- If sourcing fails (non-zero status or stderr), the suite is reported and
+  its tests are not run.
 
 ## Development
 

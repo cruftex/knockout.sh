@@ -72,6 +72,24 @@ set -euo pipefail
 # - -v : pass test stdout/stderr through in addition to capturing
 # - -d : keep temporary directory after execution
 #
+# Project mode (no file/dir arguments):
+# - Run all test directories found recursively below the current directory:
+#     * directories named "knockout-tests"
+#     * directories containing a marker file ".knockout-tests"
+#   Hidden directories are skipped. Order is sorted.
+# - If no test directory is found, print an explanatory error and usage.
+# - Directory expansion never treats ".knockout-tests" as a test.
+#
+# Turbo testsuites:
+# - Files named "*.turbo.suite.sh" are bash fn-suites that are listed like any
+#   testsuite, but in phase R are sourced once into a separate worker bash.
+# - Each listed test runs in a subshell of the worker (no exec, no re-sourcing),
+#   with the shell options the suite set at source time.
+# - Per test: stdout, stderr and status are captured and reported exactly like
+#   forked tests; progress lines and timing are identical in format.
+# - If sourcing fails (non-zero status or stderr output), that is a failure of
+#   the suite file and its tests are reported as not run.
+#
 # Shell strictness:
 # - Runner uses: set -euo pipefail
 # - Runner logic failures abort immediately.
@@ -191,7 +209,7 @@ if [[ "${1:-}" == fn-suite ]]; then
 fi
 
 usage() {
-  printf 'usage: %s [-v] [-d] <file-or-dir>...\n' "${0##*/}" >&2
+  printf 'usage: %s [-v] [-d] [<file-or-dir>...]\n' "${0##*/}" >&2
   printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout fn-suite)\n' "${0##*/}" >&2
   exit 1
 }
@@ -206,7 +224,24 @@ while getopts ":vd" opt; do
   esac
 done
 shift $((OPTIND - 1))
-[[ "$#" -ge 1 ]] || usage
+
+# Project mode: test dirs below cwd, marked by name or by a marker file.
+discover_test_dirs() {
+  find . -mindepth 1 \
+    \( -type d -name '.*' -prune \) \
+    -o \( -type d -name knockout-tests -print \) \
+    -o \( -type f -name .knockout-tests -printf '%h\n' \) \
+    | sed 's#^\./##' | LC_ALL=C sort -u
+}
+
+if [[ "$#" -eq 0 ]]; then
+  mapfile -t PROJECT_DIRS < <(discover_test_dirs)
+  if [[ "${#PROJECT_DIRS[@]}" -eq 0 ]]; then
+    printf 'no test dirs found (knockout-tests/ or .knockout-tests) below %s\n' "$PWD" >&2
+    usage
+  fi
+  set -- "${PROJECT_DIRS[@]}"
+fi
 
 # Tests calling `knockout fn-suite` get this same knockout, installed or not.
 PATH="$(dirname "$(readlink -f "$0")"):$PATH"
@@ -231,12 +266,17 @@ die() {
 }
 
 sanitize_name() {
-  local s="$1"
-  s="${s//\//__}"
-  s="${s// /_}"
-  s="${s//:/_}"
-  s="${s//[^A-Za-z0-9._-]/_}"
-  printf '%s' "$s"
+  local __s="$1"
+  __s="${__s//\//__}"
+  __s="${__s// /_}"
+  __s="${__s//:/_}"
+  __s="${__s//[^A-Za-z0-9._-]/_}"
+  # With $2: assign to that variable instead of printing (no subshell).
+  if [[ -n "${2:-}" ]]; then
+    printf -v "$2" '%s' "$__s"
+  else
+    printf '%s' "$__s"
+  fi
 }
 
 is_sh() { [[ "$1" == *.sh ]]; }
@@ -246,6 +286,9 @@ is_suite() {
   local b="${1##*/}"
   [[ "$b" == *?.suite || "$b" == *?.suite.* ]]
 }
+
+# Turbo testsuite: bash fn-suite sourced once into a worker, see run_turbo_suite.
+is_turbo() { [[ "${1##*/}" == *?.turbo.suite.sh ]]; }
 
 ensure_dir_ok_or_die() {
   local d="$1"
@@ -323,14 +366,13 @@ format_args_for_designation() {
 }
 
 extract_description_from_stdout() {
-  local stdout_file="$1"
-  local first
-  first="$(head -n 1 "$stdout_file" || true)"
-  if [[ "$first" == '# '* ]]; then
-    printf '%s' "${first:2}"
-    return 0
+  # $1 stdout file, $2 variable to assign the description to (no subshell).
+  local __first="" __desc=""
+  IFS= read -r __first <"$1" || true
+  if [[ "$__first" == '# '* ]]; then
+    __desc="${__first:2}"
   fi
-  printf ''
+  printf -v "$2" '%s' "$__desc"
 }
 
 is_testsuite_output() {
@@ -391,13 +433,18 @@ run_once_capture() {
   if [[ "$RUN_STATUS" -eq 88 ]] && is_testsuite_output "$out_file"; then
     RUN_DESC=""
   else
-    RUN_DESC="$(extract_description_from_stdout "$out_file")"
+    extract_description_from_stdout "$out_file" RUN_DESC
   fi
 
-  if [[ -n "$RUN_DESC" ]]; then
-    printf '[%s %d/%d] %s  %ss  -- %s\n' "$phase" "$idx" "$total" "$designation" "$RUN_DT" "$RUN_DESC"
+  print_progress "$phase" "$idx" "$total" "$designation" "$RUN_DT" "$RUN_DESC"
+}
+
+print_progress() {
+  # $1 phase, $2 idx, $3 total, $4 designation, $5 seconds, $6 description
+  if [[ -n "$6" ]]; then
+    printf '[%s %d/%d] %s  %ss  -- %s\n' "$1" "$2" "$3" "$4" "$5" "$6"
   else
-    printf '[%s %d/%d] %s  %ss\n' "$phase" "$idx" "$total" "$designation" "$RUN_DT"
+    printf '[%s %d/%d] %s  %ss\n' "$1" "$2" "$3" "$4" "$5"
   fi
 }
 
@@ -411,7 +458,7 @@ collect_files_or_die() {
       ensure_dir_ok_or_die "$arg"
       while IFS= read -r -d '' f; do
         FILES+=("$f")
-      done < <(find "$arg" -maxdepth 1 -type f -print0)
+      done < <(find "$arg" -maxdepth 1 -type f ! -name .knockout-tests -print0)
     else
       FILES+=("$arg")
     fi
@@ -445,7 +492,7 @@ phase_L() {
     n=$((i + 1))
 
     local base out err st suite_lines
-    base="$(sanitize_name "$f")"
+    sanitize_name "$f" base
     out="$TMPDIR/${base}.out"
     err="$TMPDIR/${base}.err"
     st="$TMPDIR/${base}.status"
@@ -475,7 +522,7 @@ run_simple() {
   RUN_IDX=$((RUN_IDX + 1))
 
   local base out err st
-  base="$(sanitize_name "$f")"
+  sanitize_name "$f" base
   out="$TMPDIR/${base}.out"
   err="$TMPDIR/${base}.err"
   st="$TMPDIR/${base}.status"
@@ -492,6 +539,24 @@ run_simple() {
   fi
 }
 
+# Sets CASE_DESIGNATION for a suite file and one parsed invocation.
+CASE_DESIGNATION=""
+suite_case_designation() {
+  local suite="$1"
+  shift
+  local testname="${1:-}" rest_argstr=""
+  if [[ "$#" -gt 1 ]]; then
+    rest_argstr="$(format_args_for_designation "${@:2}")"
+  fi
+  if [[ -z "$testname" ]]; then
+    CASE_DESIGNATION="$suite"
+  elif [[ -n "$rest_argstr" ]]; then
+    CASE_DESIGNATION="${suite}::${testname} (${rest_argstr})"
+  else
+    CASE_DESIGNATION="${suite}::${testname}"
+  fi
+}
+
 run_suite() {
   local suite="$1"
   local suite_lines="${SUITE_LINES_FILE[$suite]}"
@@ -505,35 +570,17 @@ run_suite() {
 
     RUN_IDX=$((RUN_IDX + 1))
 
-    local testname rest_argstr designation
-    testname=""
-    if [[ "${#args[@]}" -ge 1 ]]; then
-      testname="${args[0]}"
-    fi
-
-    if [[ "${#args[@]}" -gt 1 ]]; then
-      rest_argstr="$(format_args_for_designation "${args[@]:1}")"
-    else
-      rest_argstr=""
-    fi
-
-    if [[ -n "$testname" ]]; then
-      if [[ -n "$rest_argstr" ]]; then
-        designation="${suite}::${testname} (${rest_argstr})"
-      else
-        designation="${suite}::${testname}"
-      fi
-    else
-      designation="${suite}"
-    fi
+    suite_case_designation "$suite" "${args[@]}"
+    local designation="$CASE_DESIGNATION"
 
     local base out err st
-    base="$(sanitize_name "$designation")"
+    sanitize_name "$designation" base
     out="$TMPDIR/${base}.out"
     err="$TMPDIR/${base}.err"
     st="$TMPDIR/${base}.status"
 
-    run_once_capture "$suite" "$designation" "S" "$RUN_IDX" "$TOTAL_TESTS" "$out" "$err" "$st" "${args[@]}"
+    # stdin /dev/null: the loop's stdin is the suite lines file (same as turbo cases).
+    run_once_capture "$suite" "$designation" "S" "$RUN_IDX" "$TOTAL_TESTS" "$out" "$err" "$st" "${args[@]}" </dev/null
     local status
     status="$(<"$st")"
 
@@ -543,10 +590,137 @@ run_suite() {
   done <"$suite_lines"
 }
 
+# Worker for turbo suites. Runs as: bash -c "$TURBO_WORKER" ko-turbo SUITE CASES TMPDIR V_PASS SRCBASE
+# Reads cases (NUL separated: idx base argc args...) from fd 5, reports on fd 3:
+#   "SOURCED" once after a clean source, then "idx seconds" per finished case.
+read -r -d '' TURBO_WORKER <<'WORKER' || true
+__ko_suite="$1" __ko_cases="$2" __ko_tmp="$3" __ko_vpass="$4" __ko_src="$5"
+set --
+source "$__ko_suite" >"$__ko_src.out" 2>"$__ko_src.err"
+__ko_rc=$?
+__ko_opts="$(set +o)"
+__ko_shopts="$(shopt -p)"
+set +euo pipefail
+trap - ERR EXIT
+[[ "$__ko_rc" -eq 0 && ! -s "$__ko_src.err" ]] || exit "$(( __ko_rc ? __ko_rc : 1 ))"
+printf 'SOURCED\n' >&3
+
+
+exec 5<"$__ko_cases"
+while IFS= read -r -d '' -u 5 __ko_idx && IFS= read -r -d '' -u 5 __ko_base \
+      && IFS= read -r -d '' -u 5 __ko_argc; do
+  __ko_args=()
+  for (( __ko_i = 0; __ko_i < __ko_argc; __ko_i++ )); do
+    IFS= read -r -d '' -u 5 __ko_a
+    __ko_args+=("$__ko_a")
+  done
+  # Same argument handling as testsuite_main: skip leading --options.
+  while (( ${#__ko_args[@]} )); do
+    case "${__ko_args[0]}" in
+      --) __ko_args=("${__ko_args[@]:1}"); break ;;
+      --*) __ko_args=("${__ko_args[@]:1}") ;;
+      *) break ;;
+    esac
+  done
+  __ko_out="$__ko_tmp/$__ko_base.out"
+  __ko_err="$__ko_tmp/$__ko_base.err"
+  __ko_fn="${TESTSUITE_PREFIX:-t_}${__ko_args[0]:-}"
+
+  __ko_t0=$EPOCHREALTIME
+  if (( ${#__ko_args[@]} )) && declare -F "$__ko_fn" >/dev/null; then
+    if [[ "$__ko_vpass" -eq 1 ]]; then
+      ( exec 3>&- 5<&-; eval "$__ko_opts"; eval "$__ko_shopts"; "$__ko_fn" "${__ko_args[@]:1}" ) \
+        </dev/null > >(tee "$__ko_out") 2> >(tee "$__ko_err" >&2)
+    else
+      ( exec 3>&- 5<&-; eval "$__ko_opts"; eval "$__ko_shopts"; "$__ko_fn" "${__ko_args[@]:1}" ) \
+        </dev/null >"$__ko_out" 2>"$__ko_err"
+    fi
+    __ko_st=$?
+  else
+    : >"$__ko_out"
+    printf 'Error: no such test: %s\n' "${__ko_args[0]:-}" >"$__ko_err"
+    __ko_st=1
+  fi
+  __ko_t1=$EPOCHREALTIME
+
+  printf '%s\n' "$__ko_st" >"$__ko_tmp/$__ko_base.status"
+  __ko_us=$(( ${__ko_t1//[.,]/} - ${__ko_t0//[.,]/} ))
+  printf '%s %d.%03d\n' "$__ko_idx" $(( __ko_us / 1000000 )) $(( __ko_us % 1000000 / 1000 )) >&3
+done
+WORKER
+
+run_turbo_suite() {
+  local suite="$1"
+  local suite_lines="${SUITE_LINES_FILE[$suite]}"
+  local sbase cases wst src
+  sanitize_name "$suite" sbase
+  cases="$TMPDIR/${sbase}.cases"
+  wst="$TMPDIR/${sbase}.worker-status"
+  src="$TMPDIR/${sbase}.source"
+  : >"$cases"
+
+  local -a designations=() bases=()
+  local line idx="$RUN_IDX"
+  local first=$((RUN_IDX + 1))
+  while IFS= read -r line; do
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    parse_suite_line "$line"
+    idx=$((idx + 1))
+    suite_case_designation "$suite" "${PARSED_ARGS[@]}"
+    designations[idx]="$CASE_DESIGNATION"
+    sanitize_name "$CASE_DESIGNATION" "bases[$idx]"
+    printf '%s\0%s\0%s\0' "$idx" "${bases[idx]}" "${#PARSED_ARGS[@]}" >>"$cases"
+    if [[ "${#PARSED_ARGS[@]}" -gt 0 ]]; then
+      printf '%s\0' "${PARSED_ARGS[@]}" >>"$cases"
+    fi
+  done <"$suite_lines"
+  local last="$idx"
+  [[ "$last" -ge "$first" ]] || return 0
+
+  local sourced=0 got dt status out err st desc
+  exec 4>&1
+  while read -r got dt; do
+    if [[ "$got" == SOURCED ]]; then
+      sourced=1
+      continue
+    fi
+    RUN_IDX="$got"
+    out="$TMPDIR/${bases[got]}.out"
+    err="$TMPDIR/${bases[got]}.err"
+    st="$TMPDIR/${bases[got]}.status"
+    status="$(<"$st")"
+    extract_description_from_stdout "$out" desc
+    print_progress "S" "$RUN_IDX" "$TOTAL_TESTS" "${designations[got]}" "$dt" "$desc"
+    if [[ -s "$err" || "$status" -ne 0 ]]; then
+      report_error "${designations[got]}" "$status" "$out" "$err"
+    fi
+  done < <(
+    bash -c "$TURBO_WORKER" ko-turbo "$suite" "$cases" "$TMPDIR" "$V_PASS" "$src" 3>&1 1>&4
+    printf '%s\n' "$?" >"$wst"
+  )
+  wait "$!" || true
+  exec 4>&-
+
+  local wstatus
+  wstatus="$(cat "$wst" 2>/dev/null || printf '?')"
+  if [[ "$sourced" -eq 0 ]]; then
+    report_error "$suite" "$wstatus" "$src.out" "$src.err" \
+      "turbo suite failed while being sourced; its $((last - first + 1)) tests were not run"
+  elif [[ "$RUN_IDX" -lt "$last" ]]; then
+    for (( idx = RUN_IDX + 1; idx <= last; idx++ )); do
+      report_error "${designations[idx]}" "$wstatus" /dev/null /dev/null \
+        "turbo worker aborted before this test ran"
+    done
+  fi
+  RUN_IDX="$last"
+}
+
 phase_R() {
   local f
   for f in "${FILES[@]}"; do
-    if is_suite "$f"; then
+    if is_turbo "$f"; then
+      run_turbo_suite "$f"
+    elif is_suite "$f"; then
       run_suite "$f"
     else
       run_simple "$f"
