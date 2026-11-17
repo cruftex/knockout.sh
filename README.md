@@ -104,8 +104,9 @@ cases took 1.0s instead of 9.1s.
 ## Development
 
 ```bash
-make test             # black-box suite + dogfooding run of knockout on itself
-KO_UNDER_TEST=/path/to/ko bash test/knockout-test.sh   # test another copy
+make test                                  # both runs, testing this checkout
+KO_UNDER_TEST=/path/to/other ko test/      # normal knockout as harness, test another implementation
+KO_UNDER_TEST=/path/to/other bash test/knockout-test.sh   # same, without knockout as harness
 PATH=$PWD/bin:$PATH test/knockout.suite.sh usage_without_args   # run a single case
 ```
 
@@ -114,7 +115,8 @@ The black-box tests live in `test/knockout.suite.sh`, a normal fn-suite of
 through `test/knockout-test.sh`, which stubs `knockout` and `testsuite_main`
 as no-ops, sources the suite and calls every `t_*` function directly. That
 second run uses no knockout code, so a bug in knockout's suite runner cannot
-hide failing tests.
+hide failing tests. By default the suite tests the knockout that runs it;
+`KO_UNDER_TEST` points it at another implementation.
 
 The header comment of `bin/knockout` is its canonical generation prompt and is
 kept verbatim.

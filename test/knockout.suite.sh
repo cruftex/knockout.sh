@@ -2,14 +2,20 @@
 # knockout self-test suite (t_* functions). Runs via knockout (`ko`), a second
 # time independently via test/knockout-test.sh, or one case:
 #   test/knockout.suite.sh <name>
+# Tests another implementation with the normal knockout as harness:
+#   KO_UNDER_TEST=/path/to/other ko test/
 set -euo pipefail
 source <(knockout fn-suite)
 
-KO_UNDER_TEST="${KO_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/knockout}"
-if [[ ! -x "$KO_UNDER_TEST" ]]; then
-  printf 'ko under test is not executable: %s\n' "$KO_UNDER_TEST" >&2
+# Implementation under test: the knockout running this suite (first on PATH;
+# knockout puts itself there), or another one via KO_UNDER_TEST. Resolved to an
+# absolute path because tests cd and run with a reduced PATH.
+ko_wanted="${KO_UNDER_TEST:-knockout}"
+if ! KO_UNDER_TEST="$(type -P "$ko_wanted")"; then
+  printf 'knockout under test not found: %s\n' "$ko_wanted" >&2
   exit 2
 fi
+KO_UNDER_TEST="$(readlink -f "$KO_UNDER_TEST")"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ko-test.XXXXXXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT

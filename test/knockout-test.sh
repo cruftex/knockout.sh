@@ -5,6 +5,10 @@
 set -euo pipefail
 echo "# knockout.suite.sh via embedded runner"
 
+# Standalone there is no harness knockout on PATH: default to this checkout.
+KO_UNDER_TEST="${KO_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/knockout}"
+export KO_UNDER_TEST
+
 knockout() { :; }        # source <(knockout fn-suite) sources nothing
 testsuite_main() { :; }  # the suite's trailing dispatcher call does nothing
 source "$(dirname "${BASH_SOURCE[0]}")/knockout.suite.sh"
