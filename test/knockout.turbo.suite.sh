@@ -150,7 +150,205 @@ t_int_usage_without_args() {
   assert_eq "1" "$KO_RC" "usage should exit 1" || return
   assert_file_empty "$out" || return
   assert_contains "$err" "no test dirs found" || return
-  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]..." || return
+  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [run] [--verbose] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]..." || return
+}
+
+t_int_version() {
+  echo "# -v prints the embedded value outside Git and resolves snapshots in a checkout"
+  local d out err checkout sha version installed
+  case_dir version; d="$CASE_DIR"
+  out="$d/out"
+  err="$d/err"
+  checkout="$d/checkout"
+  local installer
+  installer="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/install.sh"
+  sed "s/^KNOCKOUT_VERSION='[^']*'$/KNOCKOUT_VERSION='GIT'/" "$KO_UNDER_TEST" >"$d/knockout.sh"
+  make_executable "$d/knockout.sh"
+  local KO_UNDER_TEST="$d/knockout.sh"
+  cd "$d"
+
+  run_ko "$out" "$err" -v
+  assert_eq "0" "$KO_RC" "-v should exit before discovery" || return
+  assert_file_empty "$err" || return
+  cmp -s "$out" <(printf 'GIT\n') ||
+    { fail_msg "expected exactly one line with the embedded GIT value"; return 1; }
+
+  run_ko "$out" "$err" run -v
+  assert_eq "1" "$KO_RC" "run -v should be rejected" || return
+  assert_file_empty "$out" || return
+  assert_contains "$err" "usage:" || return
+
+  run_ko "$out" "$err" -v -d "$d"
+  assert_eq "1" "$KO_RC" "-v with other options should be rejected" || return
+  assert_file_empty "$out" || return
+  assert_contains "$err" "usage:" || return
+
+  mkdir -p "$checkout/bin"
+  cp -- "$KO_UNDER_TEST" "$checkout/bin/knockout.sh"
+  cp -- "$installer" "$checkout/install.sh"
+  local KO_UNDER_TEST="$checkout/bin/knockout.sh"
+  git init -q "$checkout" || return
+  git -C "$checkout" add bin/knockout.sh || return
+  GIT_COMMITTER_DATE='2024-02-03T04:05:06+05:30' git -C "$checkout" \
+    -c user.name=Test -c user.email=test@example.org -c commit.gpgSign=false commit -qm first || return
+  sha="$(git -C "$checkout" rev-parse HEAD)" || return
+  version="0.1.0-20240202.223506-$sha"
+  assert_eq "$version" "$("$KO_UNDER_TEST" -v)" "untagged snapshot" || return
+  (
+    unset KNOCKOUT_VERSION
+    git() { fail_msg "Git called while sourcing"; return 1; }
+    source "$KO_UNDER_TEST"
+    unset -f git
+    assert_eq GIT "$KNOCKOUT_VERSION" "sourced version" || return
+    assert_eq GIT "$(bash -c 'printf "%s" "${KNOCKOUT_VERSION-}"')" "exported checkout version" || return
+    assert_eq "$version" "$(knockout_version)" "on-demand version"
+  ) || return
+
+  PREFIX="$d/install" "$checkout/install.sh" >"$out" || return
+  installed="$d/install/bin/knockout.sh"
+  git -C "$checkout" -c user.name=Test -c user.email=test@example.org \
+    -c tag.gpgSign=false tag -am release v0.1.0 || return
+  assert_eq 0.1.0 "$("$KO_UNDER_TEST" -v)" "exact release tag" || return
+  GIT_COMMITTER_DATE='2024-02-04T01:02:03Z' git -C "$checkout" \
+    -c user.name=Test -c user.email=test@example.org -c commit.gpgSign=false commit --allow-empty -qm next || return
+  sha="$(git -C "$checkout" rev-parse HEAD)" || return
+  assert_eq "0.2.0-20240204.010203-$sha" "$("$KO_UNDER_TEST" -v)" "next minor snapshot" || return
+  assert_eq "$version" "$("$installed" -v)" "installed version should stay fixed" || return
+  (
+    unset KNOCKOUT_VERSION
+    source "$installed"
+    assert_eq "$version" "$KNOCKOUT_VERSION" "installed version variable" || return
+    assert_eq "$version" "$(bash -c 'printf "%s" "${KNOCKOUT_VERSION-}"')" "exported installed version"
+  )
+}
+
+t_int_release_workflow() {
+  echo "# release preparation works offline, verifies the archive, and can retry a draft upload"
+  local d root repo prepared archive out err commit
+  case_dir release; d="$CASE_DIR"
+  root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)" || return
+  repo="$d/repo"
+  out="$d/out"
+  err="$d/err"
+  mkdir -p "$repo/bin" "$d/tools" "$d/work"
+  cp -- "$root/release.sh" "$repo/release.sh"
+  cp -- "$root/bin/knockout.sh" "$repo/bin/knockout.sh"
+  printf 'test:\n\t@test "$$RELEASE_TEST_FAIL" != yes\n' >"$repo/Makefile"
+  git init --template= -qb main "$repo" || return
+  git -C "$repo" add . || return
+  git -C "$repo" -c user.name=Test -c user.email=test@example.org \
+    -c commit.gpgSign=false commit -qm initial || return
+  commit="$(git -C "$repo" rev-parse HEAD)" || return
+
+  cat >"$d/tools/git" <<'GIT'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  remote)
+    printf '%s\n' 'git remote' >>"$RELEASE_FIXTURE/log"
+    printf '%s\n' 'git@github.com:cruftex/knockout.sh.git'
+    ;;
+  ls-remote)
+    printf '%s\n' 'git ls-remote' >>"$RELEASE_FIXTURE/log"
+    printf '%s\trefs/heads/main\n' "$RELEASE_COMMIT"
+    if [[ -f $RELEASE_FIXTURE/pushed ]]; then
+      printf 'tag-object\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$RELEASE_COMMIT"
+    fi
+    ;;
+  push)
+    printf '%s\n' 'git push' >>"$RELEASE_FIXTURE/log"
+    touch "$RELEASE_FIXTURE/pushed"
+    ;;
+  *) exec /usr/bin/git -c user.name=Test -c user.email=test@example.org -c tag.gpgSign=false "$@" ;;
+esac
+GIT
+  cat >"$d/tools/gh" <<'GH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'gh %s\n' "$*" >>"$RELEASE_FIXTURE/log"
+case "$1 $2" in
+  'auth status') ;;
+  'api --hostname')
+    if [[ $* == *'--method DELETE'* ]]; then
+      [[ $* == *'/assets/123' ]]
+      touch "$RELEASE_FIXTURE/deleted"
+    elif [[ -f $RELEASE_FIXTURE/uploaded ]]; then
+      printf 'true\ttrue\t0\thttps://example.test/draft\n'
+    elif [[ -f $RELEASE_FIXTURE/starter ]]; then
+      printf 'true\tfalse\t123\thttps://example.test/draft\n'
+    fi
+    ;;
+  'release create') printf '%s\n' 'https://example.test/draft' ;;
+  'release upload')
+    cmp -- "${@: -1}" "$RELEASE_ARCHIVE"
+    if [[ ! -f $RELEASE_FIXTURE/starter ]]; then
+      touch "$RELEASE_FIXTURE/starter"
+      exit 1
+    fi
+    test -f "$RELEASE_FIXTURE/deleted"
+    touch "$RELEASE_FIXTURE/uploaded"
+    ;;
+  *) exit 98 ;;
+esac
+GH
+  make_executable "$d/tools/git"
+  make_executable "$d/tools/gh"
+  export PATH="$d/tools:$PATH" RELEASE_FIXTURE="$d" RELEASE_COMMIT="$commit" TMPDIR="$d/work"
+
+  if RELEASE_TEST_FAIL=yes "$repo/release.sh" check >"$out" 2>"$err"; then
+    fail_msg 'release check should fail when tests fail'; return 1
+  fi
+  assert_contains "$err" "Release tests failed." || return
+  "$repo/release.sh" check >"$out" || return
+  prepared="$("$repo/release.sh" prepare v0.1.0)" || return
+  archive="$prepared/knockout.sh-v0.1.0.tar.gz"
+  "$repo/release.sh" verify "$prepared" >"$out" || return
+  assert_contains "$out" "Verified v0.1.0 at $commit" || return
+  mkdir "$d/extracted"
+  tar -xzf "$archive" -C "$d/extracted" || return
+  assert_eq 0.1.0 "$("$d/extracted/knockout.sh-v0.1.0/bin/knockout.sh" -v)" || return
+  cp -- "$archive" "$d/original.tar.gz"
+  printf 'tampered\n' >"$d/extracted/knockout.sh-v0.1.0/unexpected"
+  tar -czf "$archive" -C "$d/extracted" knockout.sh-v0.1.0 || return
+  if "$repo/release.sh" verify "$prepared" >"$out" 2>"$err"; then
+    fail_msg 'verify should reject a changed archive'; return 1
+  fi
+  assert_contains "$err" "Archive checksum changed" || return
+  if "$repo/release.sh" draft "$prepared" >"$out" 2>"$err"; then
+    fail_msg 'draft should reject a changed archive'; return 1
+  fi
+  assert_contains "$err" "Archive checksum changed" || return
+  if [[ -e "$d/log" || -n "$(git -C "$repo" tag --list)" ]]; then
+    fail_msg 'local release steps contacted the remote or created a tag'; return 1
+  fi
+  cp -- "$d/original.tar.gz" "$archive"
+
+  export RELEASE_ARCHIVE="$archive"
+  if RELEASE_TEST_FAIL=yes "$repo/release.sh" draft "$prepared" >"$out" 2>"$err"; then
+    fail_msg 'draft should fail when tests fail'; return 1
+  fi
+  assert_contains "$err" "Release tests failed." || return
+  assert_not_contains "$d/log" "git push" || return
+  assert_not_contains "$d/log" "gh release create" || return
+
+  if "$repo/release.sh" draft "$prepared" >"$out" 2>"$err"; then
+    fail_msg 'the simulated upload should fail once'; return 1
+  fi
+  assert_contains "$err" "Asset upload failed" || return
+  "$repo/release.sh" draft "$prepared" >"$out" || return
+  assert_contains "$out" "https://example.test/draft" || return
+  "$repo/release.sh" v0.1.0 >"$out" || return
+  assert_contains "$out" "already has a release or draft" || return
+  assert_line_count_regex "$d/log" '^git push$' 1 || return
+  assert_line_count_regex "$d/log" '^gh release create ' 1 || return
+  assert_line_count_regex "$d/log" '^gh release upload ' 2 || return
+  assert_eq "$prepared" "$(find "$d/work" -mindepth 1 -maxdepth 1 -type d)" "only the prepared directory should remain" || return
+
+  git -C "$repo" -c commit.gpgSign=false commit --allow-empty -qm next || return
+  if "$repo/release.sh" verify "$prepared" >"$out" 2>"$err"; then
+    fail_msg 'verify should reject a stale prepared commit'; return 1
+  fi
+  assert_contains "$err" 'differs from HEAD'
 }
 
 t_unit_executable_success_and_description() {
@@ -292,8 +490,8 @@ SCRIPT
   assert_not_contains "$out" "$nested" || return
 }
 
-t_int_options_v_k_d() {
-  echo "# -d selects a test dir, -v passes stdout through, -k keeps artifacts, -t/-j write reports"
+t_int_options_verbose_k_d() {
+  echo "# -d selects a test dir, --verbose passes stdout through, -k keeps artifacts, -t/-j write reports"
   local d t out err kept
   case_dir options; d="$CASE_DIR"
   mkdir -p "$d/tests"
@@ -308,8 +506,8 @@ printf 'visible stdout\n'
 SCRIPT
   make_executable "$t"
 
-  run_ko "$out" "$err" -v -k -t "$d/r.tap" -j "$d/r.xml" -d "$d/tests"
-  assert_eq "0" "$KO_RC" "-v -k -t -j -d run should pass" || return
+  run_ko "$out" "$err" --verbose -k -t "$d/r.tap" -j "$d/r.xml" -d "$d/tests"
+  assert_eq "0" "$KO_RC" "--verbose -k -t -j -d run should pass" || return
   assert_contains "$out" "[T 1/1] $t" || return
   assert_contains "$out" "1 tests: 1 passed, 0 failed, 0 skipped, 0 not run, 0 suite errors  " || return
   assert_contains "$d/r.tap" "ok 1 - $t" || return
@@ -323,6 +521,11 @@ SCRIPT
   find "$kept" -name '*.err' -print -quit | grep -q . || { fail_msg "missing .err artifact"; return 1; }
   find "$kept" -name '*.status' -print -quit | grep -q . || { fail_msg "missing .status artifact"; return 1; }
   rm -rf "$kept"
+
+  run_ko "$out" "$err" run --verbose -d "$d/tests"
+  assert_eq "0" "$KO_RC" "run --verbose -d should pass" || return
+  assert_contains "$out" "visible stdout" || return
+  assert_file_empty "$err" || return
 }
 
 t_unit_testsuite_runs_generated_cases() {

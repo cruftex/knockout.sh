@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+KNOCKOUT_VERSION='GIT'
+export KNOCKOUT_VERSION
 
 # CANONICAL GENERATION PROMPT
 #
@@ -82,7 +84,7 @@ set -euo pipefail
 #   (listing, worker setup or worker protocol).
 #
 # Optional parameters:
-# - -v : pass test stdout/stderr through in addition to capturing
+# - --verbose : pass test stdout/stderr through in addition to capturing
 # - -k : keep temporary directory after execution
 # - -d <dir> : test directory to run (repeatable); disables project mode
 # - -t <file> : write a TAP version 13 report (ok/not ok per test, "# SKIP",
@@ -109,6 +111,23 @@ set -euo pipefail
 #   is no other command name. Suites call "knockout.sh fn-suite" and
 #   "knockout.sh python3-unittest". The runner puts its own directory first on
 #   PATH, so these resolve to the running copy, installed or not.
+# - `KNOCKOUT_VERSION` is the version embedded in the script. A checkout embeds
+#   `GIT`. Bash callers can source the script and call `knockout_version` to print
+#   the resolved version. Sourcing performs no Git lookup.
+# - The script exports `KNOCKOUT_VERSION` with its embedded value. Child
+#   processes inherit `GIT` from a checkout or the concrete version from a
+#   stamped copy.
+# - `knockout.sh -v` must be used alone. It prints the resolved version followed
+#   by a newline and exits successfully before test discovery.
+# - When the embedded version is `GIT`, resolve it from the checkout containing
+#   the tracked script. At a release tag `vMAJOR.MINOR.PATCH` on `HEAD`, use the
+#   highest such version without the `v`. Otherwise use the next minor version
+#   after the highest reachable release tag, or `0.1.0` if there is none,
+#   followed by the `HEAD` committer timestamp in UTC (`YYYYMMDD.HHMMSS`) and the
+#   full commit SHA, separated by hyphens. If Git metadata is unavailable,
+#   print `GIT`.
+# - Installed copies and packaged releases embed a concrete version when
+#   available. A concrete version is reported verbatim.
 #
 # Development and tests:
 # - test/knockout.turbo.suite.sh sources the knockout under test (KO_UNDER_TEST,
@@ -144,7 +163,7 @@ set -euo pipefail
 # - Per test the worker writes PREFIX.out, PREFIX.err and PREFIX.status (the exit
 #   status as a decimal number) before reporting it. Pass/fail, description and
 #   error report are evaluated from these files exactly as for forked tests.
-# - With -v, the captured stdout/stderr of each test is printed after its report.
+# - With --verbose, the captured stdout/stderr is printed after each test report.
 # - No "#!worker" line: the suite file fails and its tests are reported as not run.
 #   Worker exits early, exits non-zero, or reports an unexpected line: the suite
 #   file fails and unreported tests are reported as not run.
@@ -422,8 +441,47 @@ main()
 PYTHON3_UNITTEST
 }
 
+knockout_git_version() (
+  local script root metadata epoch sha stamp tags tag version=0.1.0
+  local stable_tag='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+  script="$(readlink -f -- "${BASH_SOURCE[0]}")" || return 1
+  [[ $script == */bin/knockout.sh ]] || return 1
+  root="${script%/bin/knockout.sh}"
+  [[ -d $root/.git || -f $root/.git ]] || return 1
+  git -C "$root" ls-files --error-unmatch -- bin/knockout.sh >/dev/null || return 1
+  metadata="$(git -C "$root" log -1 --format='%ct %H' HEAD)" || return 1
+  read -r epoch sha <<< "$metadata" || return 1
+
+  tags="$(git -C "$root" tag --points-at "$sha" --sort=-version:refname 'v*')" || return 1
+  while IFS= read -r tag; do
+    if [[ $tag =~ $stable_tag ]]; then
+      printf '%s\n' "${tag#v}"
+      return 0
+    fi
+  done <<< "$tags"
+
+  tags="$(git -C "$root" tag --merged "$sha" --sort=-version:refname 'v*')" || return 1
+  while IFS= read -r tag; do
+    if [[ $tag =~ $stable_tag ]]; then
+      version="${BASH_REMATCH[1]}.$((10#${BASH_REMATCH[2]} + 1)).0"
+      break
+    fi
+  done <<< "$tags"
+  TZ=UTC0 printf -v stamp '%(%Y%m%d.%H%M%S)T' "$epoch" || return 1
+  printf '%s-%s-%s\n' "$version" "$stamp" "$sha"
+)
+
+knockout_version() {
+  if [[ $KNOCKOUT_VERSION == GIT ]] && knockout_git_version 2>/dev/null; then
+    return 0
+  fi
+  printf '%s\n' "$KNOCKOUT_VERSION"
+}
+
 usage() {
-  printf 'usage: %s [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
+  printf 'usage: %s [run] [--verbose] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
+  printf '       %s -v   # print the embedded version\n' "${0##*/}" >&2
   printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout.sh fn-suite)\n' "${0##*/}" >&2
   printf '       %s python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite\n' "${0##*/}" >&2
   exit 1
@@ -1082,7 +1140,7 @@ run_turbo_suite() {
 # Reads worker reports from stdin: the setup token once, then "INDEX SECONDS" per
 # finished case, in order. Per report: progress line and error report from the
 # case's .out/.err/.status files. $1 setup token, $2 1 = print captured output
-# (worker suites with -v). Uses REPORT_DESIGNATIONS and REPORT_BASES (by index).
+# (worker suites with --verbose). Uses REPORT_DESIGNATIONS and REPORT_BASES (by index).
 # Sets REPORT_SETUP (1 once the token was read) and REPORT_BAD (unexpected line).
 REPORT_DESIGNATIONS=()
 REPORT_BASES=()
@@ -1216,12 +1274,16 @@ run_paths() {
 TEST_DIRS=()
 OPT_SHIFT=0
 
-# Parse -v -k -d <dir>; sets OPT_SHIFT to the number of consumed arguments.
+# Parse run options and record the number of consumed arguments in OPT_SHIFT.
 parse_options() {
   local opt OPTIND=1
-  while getopts ":vkd:t:j:" opt; do
+  while getopts ":kd:t:j:-:" opt; do
     case "$opt" in
-      v) V_PASS=1 ;;
+      -)
+        # Match the whole token so a long option cannot be part of a short option group.
+        [[ ${*:OPTIND-1:1} == --verbose ]] || usage
+        V_PASS=1
+        ;;
       k) KEEP_TMP=1 ;;
       d) TEST_DIRS+=("$OPTARG") ;;
       t) TAP_FILE="$OPTARG" ;;
@@ -1233,6 +1295,11 @@ parse_options() {
 }
 
 main() {
+  if [[ $# -eq 1 && $1 == -v ]]; then
+    knockout_version
+    return 0
+  fi
+
   parse_options "$@"
   shift "$OPT_SHIFT"
 

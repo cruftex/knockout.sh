@@ -43,7 +43,9 @@ follow them unless the user decides otherwise.
 | Test description | first stdout line starting with `# ` |
 | Test directories | a `knockout-tests/` dir, or an empty `.knockout-tests` marker in any dir |
 | `knockout.sh` = `knockout.sh run` | runs all test dirs below the cwd (hidden dirs skipped, sorted) |
-| `knockout.sh -d <dir>` | runs only the given dir(s), non-recursive; `-v` pass-through, `-k` keep tmpdir |
+| `knockout.sh -d <dir>` | runs only the given dir(s), non-recursive; `--verbose` pass-through, `-k` keep tmpdir |
+| `knockout.sh -v` | prints the resolved Git version or the version stamped into the installed copy |
+| `knockout_version` | prints the same version for Bash callers that source the runner |
 
 ## Shell rules (from the prompt, project wide)
 

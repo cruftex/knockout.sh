@@ -4,11 +4,14 @@
 set -euo pipefail
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin/knockout.sh"
 dest="${PREFIX:-$HOME/.local}/bin"
+version="$("$src" -v)"
 mkdir -p "$dest"
-# Remove first: an old install may be a symlink into this checkout, and
-# copying through it would overwrite bin/knockout.sh itself.
-rm -f "$dest/knockout.sh"
-install -m 755 "$src" "$dest/knockout.sh"
+# Stage beside the destination so the move replaces even an old symlink.
+staged="$(mktemp "$dest/.knockout.sh.XXXXXX")"
+trap 'rm -f -- "$staged"' EXIT
+sed "s/^KNOCKOUT_VERSION='GIT'$/KNOCKOUT_VERSION='$version'/" "$src" >"$staged"
+chmod 755 "$staged"
+mv -fT -- "$staged" "$dest/knockout.sh"
 echo "$dest/knockout.sh (copy of $src)"
 
 # Earlier versions installed `knockout` and a `ko` symlink. Remove them only if

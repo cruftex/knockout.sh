@@ -7,6 +7,10 @@ See [Writing tests](#writing-tests) to get started.
 
 ## Install
 
+For a GitHub release, extract the attached `knockout.sh-vX.Y.Z.tar.gz` and run
+the installer from the extracted directory. It contains a runner with the
+release version embedded.
+
 ```bash
 ./install.sh          # copies bin/knockout.sh to ~/.local/bin/knockout.sh
 PREFIX=/usr/local ./install.sh   # install elsewhere; rerun to update
@@ -32,7 +36,7 @@ non-executable `*.sh` file (run via `bash`).
 - Anything else **fails**: another non-zero exit status, or any stderr output,
   even with status 0. knockout.sh then prints the test's stdout, stderr and status.
 - Stdout is free for logging; it is captured and shown on failure (or always
-  with `-v`). If the first stdout line starts with `# `, the rest of that line
+  with `--verbose`). If the first stdout line starts with `# `, the rest of that line
   is shown as the test description.
 
 ### Where tests live
@@ -107,7 +111,8 @@ To run many cases in one process in any language, use a
 
 ```bash
 knockout.sh                 # = knockout.sh run: run the project's tests
-knockout.sh [run] [-v] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...
+knockout.sh [run] [--verbose] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...
+knockout.sh -v                 # print the version
 knockout.sh fn-suite           # print the bash t_* suite handler
 knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite
 ```
@@ -122,10 +127,22 @@ knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python u
   to the files they contain (non-recursive).
 - Executable files run directly. Non-executable `*.sh` files run via `bash`.
   Anything else is a fatal error.
-- `-v` passes test stdout through. `-k` keeps the `.out`/`.err`/`.status`
+- `--verbose` passes test stdout and stderr through. `-k` keeps the `.out`/`.err`/`.status`
   files of each test for inspection.
 - `-t <file>` writes a TAP version 13 report, `-j <file>` a JUnit XML report
   (for CI). JUnit includes stdout/stderr of failed and skipped tests.
+
+In a Git checkout, `-v` reports the version tag at `HEAD`, or a snapshot
+such as `0.2.0-20261117.091341-5b636a8a4933fc0cbc21b3e9a4c4e8cef913693f`.
+Snapshots use the next minor version after the highest reachable release tag,
+starting at `0.1.0`, plus the last commit's UTC timestamp and full SHA.
+Installing from Git captures that version in the installed copy. Unstamped
+copies without Git metadata, including the automatic GitHub source archives,
+report `GIT`.
+
+Child processes inherit `KNOCKOUT_VERSION` with the embedded value, which is
+`GIT` in a checkout and the stamped version in an installed copy. Bash callers
+that source the script can call `knockout_version` to resolve it on demand.
 
 Progress output:
 
