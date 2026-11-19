@@ -79,9 +79,7 @@ PREFIX=/usr/local ./install.sh   # install elsewhere; rerun to update
 
 The command is `knockout.sh`, the project name, so it doesn't collide with
 other tools. Want a short name? Add your own alias, e.g. `alias kt=knockout.sh`
-(avoid `ko`, which is [ko.build](https://ko.build)'s command). Updating from an
-older version removes the old `knockout` and `ko` from the install directory,
-but only if they are knockout's own.
+(avoid `ko`, which is [ko.build](https://ko.build)'s command).
 
 ## Writing tests
 
