@@ -4,6 +4,8 @@
   - Add another step with a codex call to create a summary since last release
   - release.sh finilise DIR should do the final release
   - release.sh release v1.2.3 shoud do the complete workflow
+- [ ] Implement Fail Fast semantics, parameter: --stop-on-error and env var KNOCKOUT_STOP_ON_ERROR=true
+- [ ] Research projects with shell tests suites and propose a generic useful assertion library in docs/design/assertions-draft.md
 - [ ] `TMPDIR` leaks into tests depending on the caller's environment: `init_run` in `bin/knockout.sh`
   stores knockout.sh's own temp dir in `TMPDIR`. If `TMPDIR` was already exported, tests inherit it,
   so their `mktemp` files land there and are removed with it (or kept with `-k`). If it wasn't,
