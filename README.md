@@ -5,6 +5,67 @@ stderr means pass, anything else fails. A test can also act as a *testsuite
 generator* and emit a list of further test invocations.
 See [Writing tests](#writing-tests) to get started.
 
+## Design philosophy
+
+- **KISS:** a test is just a program. Exit 0 with a quiet stderr passes,
+  exit 77 skips. That's the whole contract. Assertions? Bring your own, or
+  don't.
+- **YAGNI:** no flags, config files or env vars until someone needs them.
+- **Extensible:** suites are programs too: list your cases, and knockout.sh
+  runs them ([testsuite protocol](#testsuite-protocol)). Want `test_*`
+  functions, a data table or another language? Write a suite. Bash `t_*`
+  functions and Python unittest are built in.
+- **Strict, not clever:** names decide what a suite is. A misnamed file fails
+  loudly with a hint, and nothing is guessed. knockout.sh never `cd`s or looks
+  above the current directory.
+- **One file:** suites get their helpers from the runner itself. Nothing to
+  install, nothing to locate.
+- **Fast without cheating:** turbo and worker suites run hundreds of cases in
+  one process, about 9x to 30x faster, and report exactly like forked tests.
+
+## Similar work
+
+Most shell test tools are *frameworks*: tests are written in shell, with a DSL
+and assertions. knockout.sh is a *runner*: a test is any program, judged by
+exit status and stderr, as in the Automake and Meson test harnesses (exit 77
+means skip). Bash `t_*` suites and worker suites (e.g. Python unittest) are
+optional layers on top.
+
+### Writing tests
+
+| Tool | Test written as | Tests in other languages | Assertions | Skip |
+|---|---|---|---|---|
+| knockout.sh | any executable | yes: suite and worker protocol, Python unittest built in | none, plain code | `exit 77` |
+| [bats-core](https://github.com/bats-core/bats-core) | `@test` blocks in `.bats` files | no | add-on libraries | `skip` |
+| [ShellSpec](https://github.com/shellspec/shellspec) | BDD DSL in `*_spec.sh` | no | built in | `Skip` |
+| [shUnit2](https://github.com/kward/shunit2) | `test*` functions | no | built in | `startSkipping` |
+| [bashunit](https://github.com/TypedDevs/bashunit) | `test_*` functions | no | built in | `bashunit::skip` |
+
+### Running
+
+| Tool | Pass criterion | Discovery | Many cases in one process | Parallel |
+|---|---|---|---|---|
+| knockout.sh | exit 0 **and** empty stderr | `knockout-tests/` dirs or `.knockout-tests` markers below the cwd | turbo and worker suites | no |
+| bats-core | exit status of the test | `.bats` files in the given paths | no | `--jobs`, needs GNU parallel |
+| ShellSpec | expectations | `spec/` | yes, subshell per example | `--jobs` |
+| shUnit2 | assertions | none, each file runs itself | yes | no |
+| bashunit | assertions | given paths, `tests/` by default | yes, subshell per test | `--parallel` |
+
+### Reports and setup
+
+| Tool | TAP | JUnit XML | Runner requires | Install |
+|---|---|---|---|---|
+| knockout.sh | yes | yes | bash 5 and GNU tools | one file; suites need nothing extra |
+| bats-core | yes | yes | bash | package or Git checkout |
+| ShellSpec | yes | yes | any POSIX shell | installer or package |
+| shUnit2 | no | unreleased | any POSIX shell | one sourced library |
+| bashunit | yes | yes | bash | one file |
+
+"Runner requires" is what the tool runs on. Tests for knockout.sh can be in any
+language; for the others, tests are written in that shell. If you need a rich
+assertion or BDD DSL, portability to POSIX shells, parallel runs or coverage,
+pick one of the others.
+
 ## Install
 
 For a GitHub release, extract the attached `knockout.sh-vX.Y.Z.tar.gz` and run
