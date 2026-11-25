@@ -59,6 +59,9 @@ export KNOCKOUT_VERSION
 #     * lines containing TABs are split on TABs
 #     * otherwise parsed as normal bash words (with quoting)
 # - Description lines ("# ") are ignored for testsuite generators.
+# - Location lines: "#@ FILE:LINE" gives the source location of the next test line
+#   (LINE after the last ":"). It is optional, not a test, and used for the
+#   JUnit report only.
 #
 # Progress output (one line per test):
 #
@@ -90,7 +93,9 @@ export KNOCKOUT_VERSION
 # - -t <file> : write a TAP version 13 report (ok/not ok per test, "# SKIP",
 #   suite errors as "not ok", plan line "1..N" at the end)
 # - -j <file> : write a JUnit XML report: one <testsuite name="knockout.sh">, one
-#   <testcase classname="FILE" name="TEST AND ARGS" time="..."> per test, with
+#   <testcase classname="FILE" name="TEST AND ARGS" time="..." [file="F" line="N"]>
+#   per test, file and line when a location is known (location line, or a
+#   worker's PREFIX.loc); an absolute F below the current directory is made relative,
 #   <failure> (status and stderr), <error> (not run / suite error, with hint) or
 #   <skipped/>, and <system-out>/<system-err> for failed and skipped tests.
 #
@@ -163,6 +168,8 @@ export KNOCKOUT_VERSION
 # - Per test the worker writes PREFIX.out, PREFIX.err and PREFIX.status (the exit
 #   status as a decimal number) before reporting it. Pass/fail, description and
 #   error report are evaluated from these files exactly as for forked tests.
+# - Optionally the worker writes PREFIX.loc ("FILE<TAB>LINE") for a test; it
+#   overrides the location from the listing.
 # - With --verbose, the captured stdout/stderr is printed after each test report.
 # - No "#!worker" line: the suite file fails and its tests are reported as not run.
 #   Worker exits early, exits non-zero, or reports an unexpected line: the suite
@@ -186,6 +193,8 @@ export KNOCKOUT_VERSION
 #   as "FAIL: <test>" or "ERROR: <test>" (including subtest parameters) plus the
 #   traceback (exit 1). Skipped: "skipped: <reason>" on stdout, exit 77.
 #   Expected failure: "expected failure" on stdout, exit 0.
+#   On failure or error the worker writes PREFIX.loc: the last traceback frame in
+#   the test's source file, else the test method's first line.
 # - Usage in a worker testsuite file (e.g. knockout-tests/unittest.worker.suite.sh):
 #     cd "$(dirname "$0")/.." && exec knockout.sh python3-unittest discover -s tests -t . "$@"
 #
@@ -231,6 +240,8 @@ export KNOCKOUT_VERSION
 #       - Functions are discovered via `declare -F`
 #       - Only functions whose names start with the prefix are listed
 #       - The prefix is stripped from the printed names
+#       - Before each name, print "#@ FILE:LINE" with the function's definition
+#         (declare -F under extdebug, in a subshell)
 #       - The list is prepared using exactly ONE awk invocation
 #     * Exit with status code 88
 #
@@ -285,10 +296,16 @@ testsuite_main() {
   # If executed without args: print testsuite listing and exit 88.
   if (( $# == 0 )); then
     echo "#!testsuite"
-    declare -F | awk -v p="$prefix" '
-      { name = $3 }
+    # extdebug: declare -F NAME... prints "NAME LINE FILE" (the definition).
+    (
+      shopt -s extdebug
+      mapfile -t __ko_fns < <(compgen -A function -- "$prefix")
+      if (( ${#__ko_fns[@]} )); then declare -F "${__ko_fns[@]}"; fi
+    ) | awk -v p="$prefix" '
+      { name = $1; line = $2; file = $0; sub(/^[^ ]+ [^ ]+ /, "", file) }
       index(name, p) == 1 {
         sub("^" p, "", name)
+        print "#@ " file ":" line
         print name
       }
     '
@@ -324,9 +341,11 @@ FN_SUITE
 # the worker cases). See "Python unittest worker" above.
 print_python3_unittest() {
   cat <<'PYTHON3_UNITTEST'
+import inspect
 import os
 import sys
 import time
+import traceback
 import unittest
 
 USAGE = "usage: knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]"
@@ -361,13 +380,60 @@ def discover(start, top):
     return tests
 
 
-def run_test(test, report):
+def source_file(obj):
+    try:
+        return os.path.abspath(inspect.getsourcefile(obj))
+    except (TypeError, OSError):
+        return None
+
+
+class LocationResult(unittest.TestResult):
+    """TestResult that keeps the location of the first failure or error: the
+    last traceback frame in the test's source file."""
+
+    def __init__(self, test):
+        super().__init__()
+        self.test_file = source_file(type(test))
+        self.location = None
+
+    def keep(self, err):
+        if self.location is not None or self.test_file is None or err[2] is None:
+            return
+        for frame in traceback.extract_tb(err[2]):
+            if os.path.abspath(frame.filename) == self.test_file:
+                self.location = (self.test_file, frame.lineno)
+
+    def addError(self, test, err):
+        self.keep(err)
+        super().addError(test, err)
+
+    def addFailure(self, test, err):
+        self.keep(err)
+        super().addFailure(test, err)
+
+    def addSubTest(self, test, subtest, err):
+        if err is not None:
+            self.keep(err)
+        super().addSubTest(test, subtest, err)
+
+
+def method_location(test):
+    """Location of the test method's first line, or None."""
+    try:
+        method = getattr(test, test._testMethodName)
+        return source_file(method), inspect.getsourcelines(method)[1]
+    except (AttributeError, TypeError, OSError):
+        return None
+
+
+def run_test(test, report, location=None):
     """Runs one test; failure blocks go to report. Returns the exit status:
-    0 passed, 1 failed, 77 skipped."""
+    0 passed, 1 failed, 77 skipped. On failure, writes "FILE<TAB>LINE" to the
+    file named location, if given."""
     doc = test.shortDescription()
     if doc:
         print("# " + doc, flush=True)
-    result = unittest.TestResult()
+    result = LocationResult(test)
     unittest.TestSuite([test]).run(result)
     sys.stdout.flush()
     sys.stderr.flush()
@@ -383,6 +449,10 @@ def run_test(test, report):
     sys.stdout.flush()
     report.flush()
     if not result.wasSuccessful():
+        loc = result.location or method_location(test)
+        if location and loc and loc[0]:
+            with open(location, "w") as f:
+                f.write("%s\t%d\n" % loc)
         return 1
     return 77 if result.skipped else 0
 
@@ -409,7 +479,7 @@ def worker(tests):
                     report.write("no such test: %s\n" % test_id)
                     report.flush()
                 else:
-                    status = run_test(test, report)
+                    status = run_test(test, report, prefix + ".loc")
             finally:
                 os._exit(status)
         status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
@@ -657,6 +727,7 @@ record_result() {
   if [[ -n "$JUNIT_FILE" ]]; then
     junit_entry "$@"
   fi
+  CASE_LOC_FILE="" CASE_LOC_LINE=""
 }
 
 tap_entry() {
@@ -696,7 +767,7 @@ xml_escape_file() {
 }
 
 junit_entry() {
-  local class name time="$4" msg body sout serr
+  local class name time="$4" msg body sout serr loc="" file
   if [[ "$1" == *::* ]]; then
     xml_escape "${1%%::*}" class
     xml_escape "${1#*::}" name
@@ -705,8 +776,12 @@ junit_entry() {
     name="$class"
   fi
   [[ "$time" == [0-9]* ]] || time=0
+  if [[ -n "$CASE_LOC_FILE" && -n "$CASE_LOC_LINE" ]]; then
+    xml_escape "${CASE_LOC_FILE#"$PWD"/}" file
+    loc=" file=\"$file\" line=\"$CASE_LOC_LINE\""
+  fi
   {
-    printf '    <testcase classname="%s" name="%s" time="%s">\n' "$class" "$name" "$time"
+    printf '    <testcase classname="%s" name="%s" time="%s"%s>\n' "$class" "$name" "$time" "$loc"
     case "$2" in
       pass) ;;
       skip) printf '      <skipped/>\n' ;;
@@ -899,9 +974,26 @@ TOTAL_TESTS=0
 count_suite_lines() {
   local line c=0
   while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == '#@ '* ]] && continue
     [[ -n "${line//[[:space:]]/}" ]] && c=$((c + 1))
   done <"$1"
   printf '%d' "$c"
+}
+
+# Location of a test for the JUnit report, consumed (cleared) by record_result.
+CASE_LOC_FILE=""
+CASE_LOC_LINE=""
+# Location from a listing line "#@ FILE:LINE", pending for the next test line.
+PENDING_LOC_FILE=""
+PENDING_LOC_LINE=""
+
+# Sets PENDING_LOC_FILE/PENDING_LOC_LINE from "FILE:LINE" ($1); empty unless LINE is a number.
+parse_location() {
+  PENDING_LOC_FILE="${1%:*}"
+  PENDING_LOC_LINE="${1##*:}"
+  if [[ "$1" != *:* || -z "$PENDING_LOC_FILE" || ! "$PENDING_LOC_LINE" =~ ^[0-9]+$ ]]; then
+    PENDING_LOC_FILE="" PENDING_LOC_LINE=""
+  fi
 }
 
 # Elapsed seconds (3 decimals) between two $EPOCHREALTIME values into variable $3.
@@ -1000,11 +1092,18 @@ run_suite() {
   local suite_lines="${SUITE_LINES_FILE[$suite]}"
 
   local line
+  PENDING_LOC_FILE="" PENDING_LOC_LINE=""
   while IFS= read -r line; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
+    if [[ "$line" == '#@ '* ]]; then
+      parse_location "${line:3}"
+      continue
+    fi
 
     parse_suite_line "$line"
     local -a args=("${PARSED_ARGS[@]}")
+    local loc_file="$PENDING_LOC_FILE" loc_line="$PENDING_LOC_LINE"
+    PENDING_LOC_FILE="" PENDING_LOC_LINE=""
 
     RUN_IDX=$((RUN_IDX + 1))
 
@@ -1024,6 +1123,7 @@ run_suite() {
 
     local outcome
     classify_outcome "$status" "$err" outcome
+    CASE_LOC_FILE="$loc_file" CASE_LOC_LINE="$loc_line"
     record_result "$designation" "$outcome" "$status" "$RUN_DT" "$out" "$err"
   done <"$suite_lines"
 }
@@ -1097,17 +1197,18 @@ run_turbo_suite() {
   src="$TMPDIR/${sbase}.source"
   : >"$cases"
 
-  REPORT_DESIGNATIONS=()
-  REPORT_BASES=()
+  reset_reports
   local line idx="$RUN_IDX"
   local first=$((RUN_IDX + 1))
   while IFS= read -r line; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
+    if [[ "$line" == '#@ '* ]]; then
+      parse_location "${line:3}"
+      continue
+    fi
     parse_suite_line "$line"
     idx=$((idx + 1))
-    suite_case_designation "$suite" "${PARSED_ARGS[@]}"
-    REPORT_DESIGNATIONS[idx]="$CASE_DESIGNATION"
-    sanitize_name "$CASE_DESIGNATION" "REPORT_BASES[$idx]"
+    add_report "$idx" "$suite"
     printf '%s\0%s\0%s\0' "$idx" "${REPORT_BASES[idx]}" "${#PARSED_ARGS[@]}" >>"$cases"
     if [[ "${#PARSED_ARGS[@]}" -gt 0 ]]; then
       printf '%s\0' "${PARSED_ARGS[@]}" >>"$cases"
@@ -1144,8 +1245,42 @@ run_turbo_suite() {
 # Sets REPORT_SETUP (1 once the token was read) and REPORT_BAD (unexpected line).
 REPORT_DESIGNATIONS=()
 REPORT_BASES=()
+REPORT_LOC_FILES=()
+REPORT_LOC_LINES=()
 REPORT_SETUP=0
 REPORT_BAD=""
+
+reset_reports() {
+  REPORT_DESIGNATIONS=()
+  REPORT_BASES=()
+  REPORT_LOC_FILES=()
+  REPORT_LOC_LINES=()
+  PENDING_LOC_FILE="" PENDING_LOC_LINE=""
+}
+
+# Registers case $1 of suite $2 from PARSED_ARGS; takes the pending location.
+add_report() {
+  suite_case_designation "$2" "${PARSED_ARGS[@]}"
+  REPORT_DESIGNATIONS[$1]="$CASE_DESIGNATION"
+  sanitize_name "$CASE_DESIGNATION" "REPORT_BASES[$1]"
+  REPORT_LOC_FILES[$1]="$PENDING_LOC_FILE"
+  REPORT_LOC_LINES[$1]="$PENDING_LOC_LINE"
+  PENDING_LOC_FILE="" PENDING_LOC_LINE=""
+}
+
+# Sets CASE_LOC_FILE/CASE_LOC_LINE for case $1: the worker's .loc file, else the listing.
+set_report_location() {
+  local __f="" __l=""
+  CASE_LOC_FILE="${REPORT_LOC_FILES[$1]:-}"
+  CASE_LOC_LINE="${REPORT_LOC_LINES[$1]:-}"
+  if [[ -s "$TMPDIR/${REPORT_BASES[$1]}.loc" ]]; then
+    IFS=$'\t' read -r __f __l <"$TMPDIR/${REPORT_BASES[$1]}.loc" || true
+    if [[ -n "$__f" && "$__l" =~ ^[0-9]+$ ]]; then
+      CASE_LOC_FILE="$__f" CASE_LOC_LINE="$__l"
+    fi
+  fi
+}
+
 read_worker_reports() {
   local token="$1" show="$2" line got dt status out err st desc outcome mark
   REPORT_SETUP=0
@@ -1176,6 +1311,7 @@ read_worker_reports() {
     mark=""
     [[ "$outcome" != skip ]] || mark=SKIP
     print_progress "S" "$RUN_IDX" "$TOTAL_TESTS" "${REPORT_DESIGNATIONS[got]}" "$dt" "$desc" "$mark"
+    set_report_location "$got"
     record_result "${REPORT_DESIGNATIONS[got]}" "$outcome" "$status" "$dt" "$out" "$err"
   done
 }
@@ -1186,6 +1322,7 @@ report_unreported() {
   local last="$1" idx outcome=notrun
   [[ "${4:-}" != quiet ]] || outcome=notrun-quiet
   for (( idx = RUN_IDX + 1; idx <= last; idx++ )); do
+    CASE_LOC_FILE="${REPORT_LOC_FILES[idx]:-}" CASE_LOC_LINE="${REPORT_LOC_LINES[idx]:-}"
     record_result "${REPORT_DESIGNATIONS[idx]}" "$outcome" "$2" 0 /dev/null /dev/null "$3"
   done
   RUN_IDX="$last"
@@ -1204,18 +1341,19 @@ run_worker_suite() {
   tmp="$TMPDIR"
   [[ "$tmp" == /* ]] || tmp="$PWD/$tmp"
 
-  REPORT_DESIGNATIONS=()
-  REPORT_BASES=()
+  reset_reports
   local line idx="$RUN_IDX"
   local first=$((RUN_IDX + 1))
   {
     while IFS= read -r line; do
       [[ -z "${line//[[:space:]]/}" ]] && continue
+      if [[ "$line" == '#@ '* ]]; then
+        parse_location "${line:3}"
+        continue
+      fi
       parse_suite_line "$line"
       idx=$((idx + 1))
-      suite_case_designation "$suite" "${PARSED_ARGS[@]}"
-      REPORT_DESIGNATIONS[idx]="$CASE_DESIGNATION"
-      sanitize_name "$CASE_DESIGNATION" "REPORT_BASES[$idx]"
+      add_report "$idx" "$suite"
       printf '%s\t%s\t%s\n' "$idx" "$tmp/${REPORT_BASES[idx]}" "$line"
     done <"$suite_lines"
   } >"$cases"

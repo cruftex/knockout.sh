@@ -1220,6 +1220,102 @@ t_unit_junit_report() {
   assert_contains "$d/r.xml" '<error message="notrun, status 4"/>' || return
 }
 
+t_unit_junit_location_fn_suite() {
+  echo "# JUnit has file and line of the t_* definition (forked and turbo alike)"
+  local d f here line
+  case_dir junit-loc; d="$CASE_DIR"
+  for f in "$d/a.suite.sh" "$d/a.turbo.suite.sh"; do
+    write_fn_suite "$f" <<'BODY'
+t_pass() { echo "# pass"; }
+t_fail() {
+  return 1
+}
+BODY
+  done
+  # write_fn_suite: two header lines, the handler, then the body.
+  line=$(( 2 + $(print_fn_suite | wc -l) + 2 ))
+
+  here="$PWD"
+  cd "$d"
+  run_unit_reports "$d/out" "$d/err" a.suite.sh a.turbo.suite.sh
+  cd "$here"
+  assert_eq "1" "$KO_RC" "failing tests should fail the run" || return
+  for f in a.suite.sh a.turbo.suite.sh; do
+    assert_line_count_regex "$d/r.xml" \
+      "<testcase classname=\"${f//./\\.}\" name=\"fail\" time=\"[0-9.]+\" file=\"${f//./\\.}\" line=\"$line\">" 1 || return
+    assert_line_count_regex "$d/r.xml" \
+      "<testcase classname=\"${f//./\\.}\" name=\"pass\" time=\"[0-9.]+\" file=\"${f//./\\.}\" line=\"$((line - 1))\">" 1 || return
+  done
+}
+
+t_unit_junit_location_python() {
+  echo "# JUnit has the failing line of a python3-unittest test, relative to the cwd"
+  local d here
+  case_dir junit-loc-py; d="$CASE_DIR"
+  mkdir -p "$d/proj/tests" "$d/proj/knockout-tests"
+  : >"$d/proj/tests/__init__.py"
+  cat >"$d/proj/tests/test_loc.py" <<'PYTEST'
+import unittest
+
+
+def check(x):
+    assert x == 2
+
+
+class LocTest(unittest.TestCase):
+    def test_direct(self):
+        self.assertEqual(1, 2)
+
+    def test_helper(self):
+        check(1)
+
+    def test_pass(self):
+        pass
+PYTEST
+  printf '%s\n' 'cd "$(dirname "$0")/.." && exec knockout.sh python3-unittest discover -s tests -t . "$@"' \
+    >"$d/proj/knockout-tests/u.worker.suite.sh"
+
+  here="$PWD"
+  cd "$d"
+  run_unit_reports "$d/out" "$d/err" proj/knockout-tests
+  cd "$here"
+  assert_eq "1" "$KO_RC" "failing unittest should fail the run" || return
+  local tc='<testcase classname="proj/knockout-tests/u\.worker\.suite\.sh" name="tests\.test_loc\.LocTest\.'
+  assert_line_count_regex "$d/r.xml" "${tc}test_direct\" time=\"[0-9.]+\" file=\"proj/tests/test_loc\.py\" line=\"10\">" 1 || return
+  assert_line_count_regex "$d/r.xml" "${tc}test_helper\" time=\"[0-9.]+\" file=\"proj/tests/test_loc\.py\" line=\"5\">" 1 || return
+  assert_line_count_regex "$d/r.xml" "${tc}test_pass\" time=\"[0-9.]+\">" 1 || return
+}
+
+t_unit_worker_loc_file_overrides() {
+  echo "# a worker's PREFIX.loc overrides the listing location; workers get no #@ lines"
+  local d
+  case_dir worker-loc; d="$CASE_DIR"
+  write_fn_suite "$d/w.worker.suite.sh" <<'BODY'
+if [[ "${KNOCKOUT_WORKER:-}" == 1 ]]; then
+  echo "#!worker"
+  while IFS= read -r line; do
+    printf '%s\n' "$line" >>"$(dirname "$0")/seen"
+    idx="${line%%$'\t'*}" rest="${line#*$'\t'}"
+    prefix="${rest%%$'\t'*}"
+    : >"$prefix.out"; : >"$prefix.err"; echo 0 >"$prefix.status"
+    [[ "${rest#*$'\t'}" != two ]] || printf 'own file.txt\t42\n' >"$prefix.loc"
+    echo "$idx 0.001"
+  done
+  exit 0
+fi
+if (( $# == 0 )); then printf '#!testsuite\n#@ listed.txt:7\none\n#@ x.txt:8\ntwo\n#@ a:b.txt:9\nthree\nfour\n'; exit 88; fi
+BODY
+
+  run_unit_reports "$d/out" "$d/err" "$d/w.worker.suite.sh"
+  assert_eq "0" "$KO_RC" "worker run should pass" || return
+  assert_contains "$d/out" "[S 4/4]" || return
+  assert_eq $'one\ntwo\nthree\nfour' "$(cut -f3- "$d/seen")" "worker should get test lines only" || return
+  assert_line_count_regex "$d/r.xml" 'name="one" time="[0-9.]+" file="listed\.txt" line="7">' 1 || return
+  assert_line_count_regex "$d/r.xml" 'name="two" time="[0-9.]+" file="own file\.txt" line="42">' 1 || return
+  assert_line_count_regex "$d/r.xml" 'name="three" time="[0-9.]+" file="a:b\.txt" line="9">' 1 || return
+  assert_line_count_regex "$d/r.xml" 'name="four" time="[0-9.]+">' 1 || return
+}
+
 t_unit_suite_cases_get_empty_stdin() {
   echo "# suite cases get empty stdin (forked and turbo)"
   local d f
@@ -1376,10 +1472,12 @@ t_unit_fn_suite_handler() {
     print_fn_suite
     printf 't_b() { echo "b:$*"; }\nt_a() { :; }\ntestsuite_main "$@"\n'
   } >"$d/s.sh"
-  local rc=0
+  local rc=0 n
+  n="$(print_fn_suite | wc -l)"
   bash "$d/s.sh" >"$d/list" || rc=$?
   assert_eq "88" "$rc" "listing exits 88" || return
-  assert_eq $'#!testsuite\na\nb' "$(<"$d/list")" || return
+  assert_eq "#!testsuite"$'\n'"#@ $d/s.sh:$((n + 2))"$'\na\n'"#@ $d/s.sh:$((n + 1))"$'\nb' \
+    "$(<"$d/list")" "listing has a location line before each test" || return
   assert_eq "b:x y" "$(bash "$d/s.sh" --opt -- b x y)" || return
   rc=0
   bash "$d/s.sh" nope 2>"$d/err" || rc=$?

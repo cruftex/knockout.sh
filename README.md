@@ -189,7 +189,10 @@ knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python u
 - `--verbose` passes test stdout and stderr through. `-k` keeps the `.out`/`.err`/`.status`
   files of each test for inspection.
 - `-t <file>` writes a TAP version 13 report, `-j <file>` a JUnit XML report
-  (for CI). JUnit includes stdout/stderr of failed and skipped tests.
+  (for CI). JUnit includes stdout/stderr of failed and skipped tests, and `file`/`line`
+  where known: the `t_*` definition for Bash suites, the failing line for
+  `python3-unittest`. CI report actions such as `mikepenz/action-junit-report` turn
+  these into annotations on GitHub.
 
 In a Git checkout, `-v` reports the version tag at `HEAD`, or a snapshot
 such as `0.2.0-20261117.091341-5b636a8a4933fc0cbc21b3e9a4c4e8cef913693f`.
