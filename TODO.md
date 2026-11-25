@@ -19,3 +19,6 @@
   `bin/knockout.sh` uses `find -maxdepth 1` without sorting, so run and report order can differ
   between machines and file systems. Project mode sorts the directories, but not their files.
   Sort them (`LC_ALL=C`), add a test, and say so in the canonical prompt.
+- [ ] Parallel runs: `-j N` / `--jobs N` is reserved for the number of parallel jobs (as in make, bats,
+  ShellSpec). Measure first (see "Parallel runs" in docs/gap-analysis.md); it changes the ordered
+  progress output.

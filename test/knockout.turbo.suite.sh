@@ -150,7 +150,7 @@ t_int_usage_without_args() {
   assert_eq "1" "$KO_RC" "usage should exit 1" || return
   assert_file_empty "$out" || return
   assert_contains "$err" "no test dirs found" || return
-  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [run] [--verbose] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]..." || return
+  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [run] [--verbose] [-k] [--tap-report <file>] [--junit-report <file>] [-d <dir>]..." || return
 }
 
 t_int_version() {
@@ -491,7 +491,7 @@ SCRIPT
 }
 
 t_int_options_verbose_k_d() {
-  echo "# -d selects a test dir, --verbose passes stdout through, -k keeps artifacts, -t/-j write reports"
+  echo "# -d selects a test dir, --verbose passes stdout through, -k keeps artifacts, --tap-report/--junit-report write reports"
   local d t out err kept
   case_dir options; d="$CASE_DIR"
   mkdir -p "$d/tests"
@@ -506,8 +506,8 @@ printf 'visible stdout\n'
 SCRIPT
   make_executable "$t"
 
-  run_ko "$out" "$err" --verbose -k -t "$d/r.tap" -j "$d/r.xml" -d "$d/tests"
-  assert_eq "0" "$KO_RC" "--verbose -k -t -j -d run should pass" || return
+  run_ko "$out" "$err" --verbose -k --tap-report "$d/r.tap" --junit-report "$d/r.xml" -d "$d/tests"
+  assert_eq "0" "$KO_RC" "--verbose -k --tap-report --junit-report -d run should pass" || return
   assert_contains "$out" "[T 1/1] $t" || return
   assert_contains "$out" "1 tests: 1 passed, 0 failed, 0 skipped, 0 not run, 0 suite errors  " || return
   assert_contains "$d/r.tap" "ok 1 - $t" || return
@@ -1203,7 +1203,7 @@ t_unit_tap_report() {
 }
 
 t_unit_junit_report() {
-  echo "# -j writes a valid JUnit XML report"
+  echo "# --junit-report writes a valid JUnit XML report"
   local d
   case_dir junit; d="$CASE_DIR"
   write_mixed_results "$d/t"
@@ -1218,6 +1218,20 @@ t_unit_junit_report() {
   assert_contains "$d/r.xml" '<skipped/>' || return
   assert_contains "$d/r.xml" "<testcase classname=\"$d/t/e.worker.suite.sh\" name=\"two\"" || return
   assert_contains "$d/r.xml" '<error message="notrun, status 4"/>' || return
+}
+
+t_unit_report_options() {
+  echo "# --tap-report/--junit-report take a file; -j is not an option; a missing value is an error"
+  local got rc args
+  got="$(parse_options --tap-report r.tap -k --junit-report r.xml -d t run 2>&1
+    printf '%s|%s|%s|%s' "$TAP_FILE" "$JUNIT_FILE" "$KEEP_TMP" "$OPT_SHIFT")"
+  assert_eq "r.tap|r.xml|1|7" "$got" "report files, -k and consumed argument count" || return
+  for args in "-j x" "-t x" "--junit-report" "--tap-report -k" "--junit-report= x" "-k--junit-report x"; do
+    rc=0
+    # shellcheck disable=SC2086
+    ( parse_options $args ) >/dev/null 2>&1 || rc=$?
+    assert_eq "1" "$rc" "parse_options $args should print usage and exit 1" || return
+  done
 }
 
 t_unit_junit_location_fn_suite() {

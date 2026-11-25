@@ -170,7 +170,7 @@ To run many cases in one process in any language, use a
 
 ```bash
 knockout.sh                 # = knockout.sh run: run the project's tests
-knockout.sh [run] [--verbose] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...
+knockout.sh [run] [--verbose] [-k] [--tap-report <file>] [--junit-report <file>] [-d <dir>]...
 knockout.sh -v                 # print the version
 knockout.sh fn-suite           # print the bash t_* suite handler
 knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite
@@ -188,7 +188,7 @@ knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python u
   Anything else is a fatal error.
 - `--verbose` passes test stdout and stderr through. `-k` keeps the `.out`/`.err`/`.status`
   files of each test for inspection.
-- `-t <file>` writes a TAP version 13 report, `-j <file>` a JUnit XML report
+- `--tap-report <file>` writes a TAP version 13 report, `--junit-report <file>` a JUnit XML report
   (for CI). JUnit includes stdout/stderr of failed and skipped tests, and `file`/`line`
   where known: the `t_*` definition for Bash suites, the failing line for
   `python3-unittest`. CI report actions such as `mikepenz/action-junit-report` turn

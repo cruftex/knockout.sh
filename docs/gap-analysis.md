@@ -278,7 +278,7 @@ order. You can still split by directory and run several processes yourself, each
 with its own report:
 
 ```bash
-knockout.sh -d test/unit -j unit.xml & knockout.sh -d test/slow -j slow.xml & wait
+knockout.sh -d test/unit --junit-report unit.xml & knockout.sh -d test/slow --junit-report slow.xml & wait
 ```
 
 Their progress output interleaves, and the exit status needs separate `wait`s.

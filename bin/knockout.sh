@@ -90,14 +90,15 @@ export KNOCKOUT_VERSION
 # - --verbose : pass test stdout/stderr through in addition to capturing
 # - -k : keep temporary directory after execution
 # - -d <dir> : test directory to run (repeatable); disables project mode
-# - -t <file> : write a TAP version 13 report (ok/not ok per test, "# SKIP",
+# - --tap-report <file> : write a TAP version 13 report (ok/not ok per test, "# SKIP",
 #   suite errors as "not ok", plan line "1..N" at the end)
-# - -j <file> : write a JUnit XML report: one <testsuite name="knockout.sh">, one
+# - --junit-report <file> : write a JUnit XML report: one <testsuite name="knockout.sh">, one
 #   <testcase classname="FILE" name="TEST AND ARGS" time="..." [file="F" line="N"]>
 #   per test, file and line when a location is known (location line, or a
 #   worker's PREFIX.loc); an absolute F below the current directory is made relative,
 #   <failure> (status and stderr), <error> (not run / suite error, with hint) or
 #   <skipped/>, and <system-out>/<system-err> for failed and skipped tests.
+# - -j is reserved for the number of parallel jobs (make, bats, ShellSpec).
 #
 # Project mode (run without -d):
 # - Run all test directories found recursively below the current directory:
@@ -550,7 +551,7 @@ knockout_version() {
 }
 
 usage() {
-  printf 'usage: %s [run] [--verbose] [-k] [-t <tap>] [-j <junit.xml>] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
+  printf 'usage: %s [run] [--verbose] [-k] [--tap-report <file>] [--junit-report <file>] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
   printf '       %s -v   # print the embedded version\n' "${0##*/}" >&2
   printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout.sh fn-suite)\n' "${0##*/}" >&2
   printf '       %s python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite\n' "${0##*/}" >&2
@@ -1415,17 +1416,27 @@ OPT_SHIFT=0
 # Parse run options and record the number of consumed arguments in OPT_SHIFT.
 parse_options() {
   local opt OPTIND=1
-  while getopts ":kd:t:j:-:" opt; do
+  while getopts ":kd:-:" opt; do
     case "$opt" in
       -)
         # Match the whole token so a long option cannot be part of a short option group.
-        [[ ${*:OPTIND-1:1} == --verbose ]] || usage
-        V_PASS=1
+        case "${*:OPTIND-1:1}" in
+          --verbose) V_PASS=1 ;;
+          --tap-report | --junit-report)
+            # The value is the next argument.
+            [[ $OPTIND -le $# && -n ${!OPTIND} && ${!OPTIND} != -* ]] || usage
+            if [[ ${*:OPTIND-1:1} == --tap-report ]]; then
+              TAP_FILE="${!OPTIND}"
+            else
+              JUNIT_FILE="${!OPTIND}"
+            fi
+            OPTIND=$((OPTIND + 1))
+            ;;
+          *) usage ;;
+        esac
         ;;
       k) KEEP_TMP=1 ;;
       d) TEST_DIRS+=("$OPTARG") ;;
-      t) TAP_FILE="$OPTARG" ;;
-      j) JUNIT_FILE="$OPTARG" ;;
       *) usage ;;
     esac
   done
