@@ -20,15 +20,16 @@ follow them unless the user decides otherwise.
 ## Design principles
 
 - **YAGNI.** No options, arguments or env vars until they are actually needed.
-- **No surprising behavior.** Example: project mode searches only the current directory. There is no
-  git-root lookup and no `cd`.
+- **No surprising behavior.** Example: a bare `knockout.sh` runs only the test dir of the current
+  directory; recursion needs the explicit `discover`. There is no git-root lookup and no `cd`.
 - **Strict conventions over guessing.** Example: suites are recognized by file name only. A misnamed
   suite is a failure with a hint, not silently detected.
 - **One self-contained file.** `bin/knockout.sh` has no library files and no install location. Anything
   that suites need is emitted by knockout.sh itself (`knockout.sh fn-suite`).
-- **Positional arguments are commands** (`run`, the default, `fn-suite` and `python3-unittest`); anything else is an
-  error. Tests are selected by directory (`-d <dir>`, repeatable) or by discovery. A single test is
-  run by calling it directly, never through `knockout.sh`.
+- **The first positional argument is a command** (`run`, the default, `discover`, `fn-suite` and
+  `python3-unittest`); anything else is an error. Tests are selected by `run PATH…` (test dirs or
+  test files, options before paths) or by `discover`. A single case is run by calling its suite
+  directly.
 
 ## Conventions
 
@@ -42,8 +43,10 @@ follow them unless the user decides otherwise.
 | Python worker | `knockout.sh python3-unittest discover …`: stderr is **not** a failure, unittest decides |
 | Test description | first stdout line starting with `# ` |
 | Test directories | a `knockout-tests/` dir, or an empty `.knockout-tests` marker in any dir |
-| `knockout.sh` = `knockout.sh run` | runs all test dirs below the cwd (hidden dirs skipped, sorted) |
-| `knockout.sh -d <dir>` | runs only the given dir(s), non-recursive; `--verbose` pass-through, `-k` keep tmpdir, `--tap-report`/`--junit-report <file>` reports; `-j` is reserved for parallel jobs |
+| `knockout.sh` = `knockout.sh run` | runs the cwd's test dir: `knockout-tests/` in it and `.` if marked; else a one-line error (make style) |
+| `knockout.sh run PATH…` | runs the given test dirs (non-recursive) and test files in order |
+| `knockout.sh discover` | runs all test dirs below the cwd (hidden dirs skipped, sorted) |
+| Options (before paths) | `--verbose` pass-through, `-k` keep tmpdir, `--tap-report`/`--junit-report <file>` reports; `-j` is reserved for parallel jobs |
 | `knockout.sh -v` | prints the resolved Git version or the version stamped into the installed copy |
 | `knockout_version` | prints the same version for Bash callers that source the runner |
 
@@ -82,11 +85,11 @@ follow them unless the user decides otherwise.
   - `test/knockout-test.sh`: a second, independent run of the same `t_*` functions. It stubs
     `knockout.sh` and `testsuite_main` as no-ops, so no knockout.sh code acts as harness.
 - **Implementation under test:** by default the knockout.sh that runs the suite. Test another one with
-  `KO_UNDER_TEST=/path/to/knockout.sh knockout.sh -d test`. The copy must be named `knockout.sh`.
+  `KO_UNDER_TEST=/path/to/knockout.sh knockout.sh run test`. The copy must be named `knockout.sh`.
 - **Every case cleans up after itself:** use `case_dir NAME; d="$CASE_DIR"`. Never use
   `d="$(case_dir …)"`, because the subshell would remove the dir immediately.
-- **Never run the complete script without arguments from the repo.** It would find the repo's own
-  tests and recurse. `cd` into an empty case dir first.
+- **Never run `knockout.sh discover` from the repo in a test.** It would find the repo's own tests
+  and recurse. `cd` into a case dir first.
 - **Fixture suites:** when a test needs a throwaway bash suite as test data, create it with
   `write_fn_suite PATH <<'BODY' … BODY`. It pastes the fn-suite handler into the file (from
   `print_fn_suite` of the sourced knockout.sh) instead of writing `source <(knockout.sh fn-suite)`, which

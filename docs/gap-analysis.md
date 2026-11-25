@@ -20,7 +20,7 @@ workaround, is a candidate for a feature, or is out of scope.
 | [Setup / teardown hooks](#setup-and-teardown) | all four | suite top level, `trap … EXIT` | workaround |
 | [Parameterized tests](#parameterized-tests) | ShellSpec, bashunit | testsuite protocol listing lines with arguments | covered |
 | [Mocks and spies](#mocks-and-spies) | ShellSpec, bashunit | `PATH` stubs, function overrides | workaround |
-| [Select by name or tag](#selecting-tests) | bats, ShellSpec, bashunit | `-d <dir>`, call a single test directly | gap |
+| [Select by name or tag](#selecting-tests) | bats, ShellSpec, bashunit | `run PATH…` (dir or file), call a single test directly | gap |
 | [Parallel runs](#parallel-runs) | bats, ShellSpec, bashunit | none | gap |
 | [Fail fast](#fail-fast) | bats, ShellSpec, bashunit | none | gap |
 | [Coverage](#coverage) | ShellSpec (kcov), bashunit | none | out of scope for now |
@@ -253,11 +253,12 @@ A spy is the same stub with an extra line that appends `"$@"` to a log file.
 - ShellSpec: `shellspec spec/math_spec.sh:12` (by line), `--example 'adds'`
 - bashunit: `bashunit --filter add tests/`, `--tag`, `--exclude-tag`
 
-knockout.sh: select a directory with `-d <dir>`. Run a single test directly,
-without the runner:
+knockout.sh: select directories or test files with `run PATH…`. Run a single case
+directly, without the runner:
 
 ```bash
-knockout.sh -d test/math                 # one directory
+knockout.sh run test/math                # one directory
+knockout.sh run t/math.suite.sh          # one suite
 bash t/math.suite.sh add 2 2 4           # one case, exactly as the runner calls it
 ```
 
@@ -278,7 +279,7 @@ order. You can still split by directory and run several processes yourself, each
 with its own report:
 
 ```bash
-knockout.sh -d test/unit --junit-report unit.xml & knockout.sh -d test/slow --junit-report slow.xml & wait
+knockout.sh --junit-report unit.xml run test/unit & knockout.sh --junit-report slow.xml run test/slow & wait
 ```
 
 Their progress output interleaves, and the exit status needs separate `wait`s.
@@ -331,7 +332,7 @@ a readable diff. Update the snapshot with `mytool --help > test/snapshots/help.t
 ## Watch mode
 
 bashunit: `bashunit watch tests/`. knockout.sh: none. Use an external watcher,
-e.g. `ls -d src/* test/* | entr knockout.sh`.
+e.g. `ls -d src/* test/* | entr knockout.sh discover`.
 
 **Verdict: out of scope.**
 

@@ -45,7 +45,7 @@ optional layers on top.
 
 | Tool | Pass criterion | Discovery | Many cases in one process | Parallel |
 |---|---|---|---|---|
-| knockout.sh | exit 0 **and** empty stderr | `knockout-tests/` dirs or `.knockout-tests` markers below the cwd | turbo and worker suites | no |
+| knockout.sh | exit 0 **and** empty stderr | `knockout-tests/` or a `.knockout-tests` marker in the cwd; `discover` searches below it | turbo and worker suites | no |
 | bats-core | exit status of the test | `.bats` files in the given paths | no | `--jobs`, needs GNU parallel |
 | ShellSpec | expectations | `spec/` | yes, subshell per example | `--jobs` |
 | shUnit2 | assertions | none, each file runs itself | yes | no |
@@ -107,8 +107,8 @@ empty `.knockout-tests` file:
 mkdir -p test && touch test/.knockout-tests
 ```
 
-`knockout.sh` finds these test directories anywhere below the current directory (hidden
-directories are skipped). Only the files directly inside a test directory are
+`knockout.sh` runs the test directory of the current directory; `knockout.sh discover`
+finds test directories anywhere below it (hidden directories are skipped). Only the files directly inside a test directory are
 tests, and each one must be runnable (executable, or `*.sh`): anything else
 stops the run. Subdirectories of a test directory are not run, unless they are
 marked as test directories themselves, so put helpers and fixtures there (e.g.
@@ -127,7 +127,7 @@ out="$(echo hello)"          # replace with the command under test
 ```
 
 ```
-$ knockout.sh
+$ knockout.sh run test        # or: knockout.sh discover
 [T 1/1] test/greeting-test.sh  0.003s  -- greeting says hello
 ```
 
@@ -169,21 +169,31 @@ To run many cases in one process in any language, use a
 ## Usage
 
 ```bash
-knockout.sh                 # = knockout.sh run: run the project's tests
-knockout.sh [run] [--verbose] [-k] [--tap-report <file>] [--junit-report <file>] [-d <dir>]...
+knockout.sh                    # = knockout.sh run: run the test dir in the cwd
+knockout.sh [run] [OPTIONS] [PATH...]   # run test dirs and test files
+knockout.sh discover [OPTIONS]          # run all test dirs below the cwd
+# OPTIONS: [--verbose] [-k] [--tap-report <file>] [--junit-report <file>]
 knockout.sh -v                 # print the version
 knockout.sh fn-suite           # print the bash t_* suite handler
 knockout.sh python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite
 ```
 
-- A positional argument is always a command: `run` (the default),
-  `fn-suite` or `python3-unittest`. To run a single test, call it directly.
-- Without `-d`, knockout.sh runs every test directory found recursively below
-  the current directory: directories named `knockout-tests/`, and
-  directories containing an empty marker file `.knockout-tests`
-  (e.g. `test/.knockout-tests`). Hidden directories are skipped.
-- `-d <dir>` runs only the given directory (repeatable). Directories expand
-  to the files they contain (non-recursive).
+- The first positional argument is always a command: `run` (the default),
+  `discover`, `fn-suite` or `python3-unittest`. Paths need an explicit `run`;
+  options come before them.
+- `run PATH...` runs the given test directories and test files in argument order.
+  Directories expand to the files they contain (non-recursive). A single test
+  can also be called directly.
+- Without PATH, `run` takes the test directory of the current directory:
+  `knockout-tests/` in it, and the current directory itself if it contains the
+  marker `.knockout-tests`. If there is none, it stops with one line, make style:
+  `knockout.sh: Run failed, no test directory here (Either in knockout-tests/ or .knockout-tests marker). Stop.`
+  It never searches subdirectories, so starting it in the wrong place (e.g.
+  `$HOME`) runs nothing.
+- `discover` runs every test directory found recursively below the current
+  directory: directories named `knockout-tests/`, and directories containing an
+  empty marker file `.knockout-tests` (e.g. `test/.knockout-tests`). Hidden
+  directories are skipped.
 - Executable files run directly. Non-executable `*.sh` files run via `bash`.
   Anything else is a fatal error.
 - `--verbose` passes test stdout and stderr through. `-k` keeps the `.out`/`.err`/`.status`

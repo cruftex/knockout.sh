@@ -14,13 +14,20 @@ export KNOCKOUT_VERSION
 # Runs the test files of test directories. Directories are expanded to their
 # contained files (non-recursive). All files are collected first before execution.
 #
-# Commands (a positional argument is always a command):
-# - run (default): run the test directories given with -d, or, without -d,
-#   all test directories found below the current directory (project mode).
+# Commands (the first positional argument is always a command):
+# - run [PATH...] (default): run the given test directories (their files,
+#   non-recursive) and test files, in argument order. Without PATH, run the
+#   test directory of the current directory: "knockout-tests" in it, and the
+#   current directory itself if it contains a marker file ".knockout-tests".
+#   If there is none, print "knockout.sh: Run failed, no test directory here
+#   (Either in knockout-tests/ or .knockout-tests marker). Stop." (one line) to
+#   stderr and exit 1, without usage.
+# - discover: run all test directories found below the current directory
+#   (project mode); takes the run options, no PATH.
 # - fn-suite: print the bash t_* testsuite handler (see below).
 # - python3-unittest discover [-s START] [-t TOP] [TEST_ID]: run Python unittest
 #   tests as a worker testsuite (see "Python unittest worker" below).
-# - Anything else: print usage and exit 1. Single tests are run by calling them directly.
+# - Anything else: print usage and exit 1. A single test can also be run by calling it directly.
 #
 # Execution rules:
 # - Executable files are run directly.
@@ -89,7 +96,6 @@ export KNOCKOUT_VERSION
 # Optional parameters:
 # - --verbose : pass test stdout/stderr through in addition to capturing
 # - -k : keep temporary directory after execution
-# - -d <dir> : test directory to run (repeatable); disables project mode
 # - --tap-report <file> : write a TAP version 13 report (ok/not ok per test, "# SKIP",
 #   suite errors as "not ok", plan line "1..N" at the end)
 # - --junit-report <file> : write a JUnit XML report: one <testsuite name="knockout.sh">, one
@@ -99,8 +105,9 @@ export KNOCKOUT_VERSION
 #   <failure> (status and stderr), <error> (not run / suite error, with hint) or
 #   <skipped/>, and <system-out>/<system-err> for failed and skipped tests.
 # - -j is reserved for the number of parallel jobs (make, bats, ShellSpec).
+#   Options come before PATH arguments.
 #
-# Project mode (run without -d):
+# Project mode (discover):
 # - Run all test directories found recursively below the current directory:
 #     * directories named "knockout-tests"
 #     * directories containing a marker file ".knockout-tests"
@@ -141,7 +148,7 @@ export KNOCKOUT_VERSION
 #   (unit tests). Only a few integration tests run the complete script.
 # - test/knockout-test.sh runs the same t_* functions a second time without
 #   any knockout as harness, so a runner bug cannot hide failing tests.
-# - Testing another implementation: KO_UNDER_TEST=/path/to/knockout.sh knockout.sh -d test
+# - Testing another implementation: KO_UNDER_TEST=/path/to/knockout.sh knockout.sh run test
 #
 # Turbo testsuites:
 # - Files named "*.turbo.suite.sh" are bash fn-suites that are listed like any
@@ -551,14 +558,25 @@ knockout_version() {
 }
 
 usage() {
-  printf 'usage: %s [run] [--verbose] [-k] [--tap-report <file>] [--junit-report <file>] [-d <dir>]...   # default: test dirs below cwd\n' "${0##*/}" >&2
+  printf 'usage: %s [run] [OPTIONS] [PATH...]   # PATH: test dir or test file; default: the test dir in cwd\n' "${0##*/}" >&2
+  printf '       %s discover [OPTIONS]          # all test dirs below cwd\n' "${0##*/}" >&2
+  printf '       OPTIONS: [--verbose] [-k] [--tap-report <file>] [--junit-report <file>]\n' >&2
   printf '       %s -v   # print the embedded version\n' "${0##*/}" >&2
   printf '       %s fn-suite   # print t_* suite handler; use: source <(knockout.sh fn-suite)\n' "${0##*/}" >&2
   printf '       %s python3-unittest discover [-s START] [-t TOP] [TEST_ID]   # Python unittest worker suite\n' "${0##*/}" >&2
   exit 1
 }
 
-# Project mode: test dirs below cwd, marked by name or by a marker file.
+# run without PATH: the test dir of the cwd into RUN_ARGS ("." if marked, then
+# "knockout-tests"); returns 1 if there is none.
+cwd_test_dirs() {
+  RUN_ARGS=()
+  [[ ! -f .knockout-tests ]] || RUN_ARGS+=(.)
+  [[ ! -d knockout-tests ]] || RUN_ARGS+=(knockout-tests)
+  (( ${#RUN_ARGS[@]} ))
+}
+
+# Project mode (discover): test dirs below cwd, marked by name or by a marker file.
 discover_test_dirs() {
   find . -mindepth 1 \
     \( -type d -name '.*' -prune \) \
@@ -1410,13 +1428,13 @@ run_paths() {
   phase_R
 }
 
-TEST_DIRS=()
+RUN_ARGS=()
 OPT_SHIFT=0
 
 # Parse run options and record the number of consumed arguments in OPT_SHIFT.
 parse_options() {
   local opt OPTIND=1
-  while getopts ":kd:-:" opt; do
+  while getopts ":k-:" opt; do
     case "$opt" in
       -)
         # Match the whole token so a long option cannot be part of a short option group.
@@ -1436,7 +1454,6 @@ parse_options() {
         esac
         ;;
       k) KEEP_TMP=1 ;;
-      d) TEST_DIRS+=("$OPTARG") ;;
       *) usage ;;
     esac
   done
@@ -1463,7 +1480,7 @@ main() {
     python3-unittest)
       exec python3 -c "$(print_python3_unittest)" "$@"
       ;;
-    run) ;;
+    run | discover) ;;
     *)
       printf 'unknown command: %s\n' "$cmd" >&2
       usage
@@ -1472,20 +1489,19 @@ main() {
 
   parse_options "$@"
   shift "$OPT_SHIFT"
-  [[ "$#" -eq 0 ]] || { printf 'unexpected argument: %s\n' "$1" >&2; usage; }
-
-  local d
-  if [[ "${#TEST_DIRS[@]}" -eq 0 ]]; then
-    mapfile -t TEST_DIRS < <(discover_test_dirs)
-    if [[ "${#TEST_DIRS[@]}" -eq 0 ]]; then
+  # The remaining arguments are the paths of run.
+  if [[ "$cmd" == discover ]]; then
+    [[ "$#" -eq 0 ]] || { printf 'discover takes no path: %s\n' "$1" >&2; usage; }
+    mapfile -t RUN_ARGS < <(discover_test_dirs)
+    if [[ "${#RUN_ARGS[@]}" -eq 0 ]]; then
       printf 'no test dirs found (knockout-tests/ or .knockout-tests) below %s\n' "$PWD" >&2
       usage
     fi
-  else
-    for d in "${TEST_DIRS[@]}"; do
-      [[ -e "$d" ]] || die "path not found: $d"
-      [[ -d "$d" ]] || die "expected directory, got file: $d"
-    done
+  elif [[ "$#" -gt 0 ]]; then
+    RUN_ARGS=("$@")
+  elif ! cwd_test_dirs; then
+    printf '%s\n' 'knockout.sh: Run failed, no test directory here (Either in knockout-tests/ or .knockout-tests marker). Stop.' >&2
+    exit 1
   fi
 
   # Suites calling `knockout.sh fn-suite` get this same knockout.sh, installed or not.
@@ -1493,7 +1509,7 @@ main() {
   export PATH
 
   init_run
-  run_paths "${TEST_DIRS[@]}"
+  run_paths "${RUN_ARGS[@]}"
   finish_run
 
   if [[ "$had_test_error" -ne 0 ]]; then

@@ -4,7 +4,7 @@
 # second time independently via test/knockout-test.sh, or one case:
 #   test/knockout.turbo.suite.sh <name>
 # Tests another implementation with the normal knockout.sh as harness:
-#   KO_UNDER_TEST=/path/to/other/knockout.sh knockout.sh -d test
+#   KO_UNDER_TEST=/path/to/other/knockout.sh knockout.sh run test
 set -euo pipefail
 source <(knockout.sh fn-suite)
 
@@ -136,21 +136,22 @@ case_dir() {
 }
 
 t_int_usage_without_args() {
-  echo "# usage without arguments"
+  echo "# a bare call without a test dir in the cwd fails with one line, no usage, no recursion"
   local d out err
   case_dir usage; d="$CASE_DIR"
   out="$d/out"
   err="$d/err"
 
-  # Empty cwd: project mode must find nothing (and never this repo's tests).
+  # Only a nested test dir: a bare call must not recurse (and never find this repo's tests).
+  mkdir -p "$d/sub/knockout-tests"
+  printf 'echo nested >&2; exit 1\n' >"$d/sub/knockout-tests/n.sh"
   local here="$PWD"
   cd "$d"
   run_ko "$out" "$err"
   cd "$here"
   assert_eq "1" "$KO_RC" "usage should exit 1" || return
   assert_file_empty "$out" || return
-  assert_contains "$err" "no test dirs found" || return
-  assert_contains "$err" "usage: ${KO_UNDER_TEST##*/} [run] [--verbose] [-k] [--tap-report <file>] [--junit-report <file>] [-d <dir>]..." || return
+  assert_eq 'knockout.sh: Run failed, no test directory here (Either in knockout-tests/ or .knockout-tests marker). Stop.' "$(<"$err")" "one make-style line, no usage" || return
 }
 
 t_int_version() {
@@ -178,7 +179,7 @@ t_int_version() {
   assert_file_empty "$out" || return
   assert_contains "$err" "usage:" || return
 
-  run_ko "$out" "$err" -v -d "$d"
+  run_ko "$out" "$err" -v -k
   assert_eq "1" "$KO_RC" "-v with other options should be rejected" || return
   assert_file_empty "$out" || return
   assert_contains "$err" "usage:" || return
@@ -491,7 +492,7 @@ SCRIPT
 }
 
 t_int_options_verbose_k_d() {
-  echo "# -d selects a test dir, --verbose passes stdout through, -k keeps artifacts, --tap-report/--junit-report write reports"
+  echo "# run PATH selects a test dir, --verbose passes stdout through, -k keeps artifacts, --tap-report/--junit-report write reports"
   local d t out err kept
   case_dir options; d="$CASE_DIR"
   mkdir -p "$d/tests"
@@ -506,8 +507,8 @@ printf 'visible stdout\n'
 SCRIPT
   make_executable "$t"
 
-  run_ko "$out" "$err" --verbose -k --tap-report "$d/r.tap" --junit-report "$d/r.xml" -d "$d/tests"
-  assert_eq "0" "$KO_RC" "--verbose -k --tap-report --junit-report -d run should pass" || return
+  run_ko "$out" "$err" --verbose -k --tap-report "$d/r.tap" --junit-report "$d/r.xml" run "$d/tests"
+  assert_eq "0" "$KO_RC" "--verbose -k --tap-report --junit-report run PATH should pass" || return
   assert_contains "$out" "[T 1/1] $t" || return
   assert_contains "$out" "1 tests: 1 passed, 0 failed, 0 skipped, 0 not run, 0 suite errors  " || return
   assert_contains "$d/r.tap" "ok 1 - $t" || return
@@ -522,8 +523,8 @@ SCRIPT
   find "$kept" -name '*.status' -print -quit | grep -q . || { fail_msg "missing .status artifact"; return 1; }
   rm -rf "$kept"
 
-  run_ko "$out" "$err" run --verbose -d "$d/tests"
-  assert_eq "0" "$KO_RC" "run --verbose -d should pass" || return
+  run_ko "$out" "$err" run --verbose "$d/tests"
+  assert_eq "0" "$KO_RC" "run --verbose PATH should pass" || return
   assert_contains "$out" "visible stdout" || return
   assert_file_empty "$err" || return
 }
@@ -651,7 +652,7 @@ SCRIPT
   make_executable "$suite"
 
   # Minimal PATH without any installed knockout: runner must provide itself.
-  PATH="/usr/bin:/bin" run_ko "$out" "$err" -d "$dir/tests"
+  PATH="/usr/bin:/bin" run_ko "$out" "$err" run "$dir/tests"
   assert_eq "0" "$KO_RC" "suite sourcing fn-suite should pass" || return
   assert_file_empty "$err" || return
   assert_contains "$out" "[S 4/4]" || return
@@ -720,7 +721,7 @@ t_unit_broken_listing_fails_and_continues() {
 }
 
 t_int_project_mode_discovers_test_dirs() {
-  echo "# no arguments runs test dirs below cwd"
+  echo "# discover runs test dirs below cwd"
   local d out err here
   case_dir project-mode; d="$CASE_DIR"
   out="$d/out"
@@ -734,7 +735,7 @@ t_int_project_mode_discovers_test_dirs() {
 
   here="$PWD"
   cd "$d/proj"
-  run_ko "$out" "$err"
+  run_ko "$out" "$err" discover
   cd "$here"
   assert_eq "0" "$KO_RC" "project mode should pass" || return
   assert_file_empty "$err" || return
@@ -1221,12 +1222,12 @@ t_unit_junit_report() {
 }
 
 t_unit_report_options() {
-  echo "# --tap-report/--junit-report take a file; -j is not an option; a missing value is an error"
+  echo "# --tap-report/--junit-report take a file; -d, -j, -t are not options; a missing value is an error"
   local got rc args
-  got="$(parse_options --tap-report r.tap -k --junit-report r.xml -d t run 2>&1
+  got="$(parse_options --tap-report r.tap -k --junit-report r.xml run t 2>&1
     printf '%s|%s|%s|%s' "$TAP_FILE" "$JUNIT_FILE" "$KEEP_TMP" "$OPT_SHIFT")"
-  assert_eq "r.tap|r.xml|1|7" "$got" "report files, -k and consumed argument count" || return
-  for args in "-j x" "-t x" "--junit-report" "--tap-report -k" "--junit-report= x" "-k--junit-report x"; do
+  assert_eq "r.tap|r.xml|1|5" "$got" "report files, -k and consumed argument count" || return
+  for args in "-d x" "-j x" "-t x" "--junit-report" "--tap-report -k" "--junit-report= x" "-k--junit-report x"; do
     rc=0
     # shellcheck disable=SC2086
     ( parse_options $args ) >/dev/null 2>&1 || rc=$?
@@ -1348,7 +1349,7 @@ BODY
 }
 
 t_int_commands() {
-  echo "# knockout.sh equals knockout.sh run; a file argument is an unknown command; -d needs a dir; python3-unittest usage"
+  echo "# knockout.sh equals knockout.sh run; a file argument is an unknown command; run takes paths; discover is explicit; python3-unittest usage"
   local d here
   case_dir commands; d="$CASE_DIR"
   mkdir -p "$d/proj/knockout-tests"
@@ -1362,8 +1363,12 @@ t_int_commands() {
   local run_rc="$KO_RC"
   run_ko "$d/file.out" "$d/file.err" knockout-tests/a.sh
   local file_rc="$KO_RC"
-  run_ko "$d/missing.out" "$d/missing.err" -d nope
+  run_ko "$d/missing.out" "$d/missing.err" run nope
   local missing_rc="$KO_RC"
+  run_ko "$d/onefile.out" "$d/onefile.err" run knockout-tests/a.sh
+  local onefile_rc="$KO_RC"
+  run_ko "$d/discpath.out" "$d/discpath.err" discover knockout-tests
+  local discpath_rc="$KO_RC"
   run_ko "$d/py1.out" "$d/py1.err" python3-unittest
   local py1_rc="$KO_RC"
   run_ko "$d/py2.out" "$d/py2.err" python3-unittest discover -x y
@@ -1374,9 +1379,13 @@ t_int_commands() {
   assert_eq "$(normalize_run "$d/bare.out")" "$(normalize_run "$d/run.out")" "knockout.sh and knockout.sh run should match" || return
   assert_eq "1" "$file_rc" "file argument should fail" || return
   assert_contains "$d/file.err" "unknown command: knockout-tests/a.sh" || return
-  assert_contains "$d/file.err" "usage:" || return
-  assert_eq "1" "$missing_rc" "missing -d dir should fail" || return
+  assert_contains "$d/file.err" "usage: ${KO_UNDER_TEST##*/} [run] [OPTIONS] [PATH...]" || return
+  assert_eq "1" "$missing_rc" "missing run path should fail" || return
   assert_contains "$d/missing.err" "die: path not found: nope" || return
+  assert_eq "0" "$onefile_rc" "run with a test file should pass" || return
+  assert_contains "$d/onefile.out" "[T 1/1] knockout-tests/a.sh" || return
+  assert_eq "1" "$discpath_rc" "discover with a path should fail" || return
+  assert_contains "$d/discpath.err" "discover takes no path: knockout-tests" || return
   assert_eq "1 1" "$py1_rc $py2_rc" "python3-unittest without discover or with unknown option should fail" || return
   assert_contains "$d/py1.err" "usage: knockout.sh python3-unittest discover" || return
   assert_contains "$d/py2.err" "usage: knockout.sh python3-unittest discover" || return
@@ -1476,6 +1485,20 @@ t_unit_discover_test_dirs() {
   : >"$d/a/.knockout-tests"
   : >"$d/c/.git/.knockout-tests"
   assert_eq $'a\nb/knockout-tests' "$(cd "$d" && discover_test_dirs)" || return
+}
+
+t_unit_cwd_test_dirs() {
+  echo "# run without PATH takes knockout-tests/ in cwd and cwd itself if marked, nothing nested"
+  local d
+  case_dir cwd-dirs; d="$CASE_DIR"
+  mkdir -p "$d/named/knockout-tests" "$d/marked" "$d/both/knockout-tests" "$d/nested/sub/knockout-tests"
+  : >"$d/marked/.knockout-tests"
+  : >"$d/both/.knockout-tests"
+  : >"$d/nested/sub/.knockout-tests"
+  assert_eq "knockout-tests" "$(cd "$d/named" && cwd_test_dirs && printf '%s' "${RUN_ARGS[*]}")" "named" || return
+  assert_eq "." "$(cd "$d/marked" && cwd_test_dirs && printf '%s' "${RUN_ARGS[*]}")" "marked" || return
+  assert_eq ". knockout-tests" "$(cd "$d/both" && cwd_test_dirs && printf '%s' "${RUN_ARGS[*]}")" "both" || return
+  assert_eq "1" "$(cd "$d/nested" && if cwd_test_dirs; then echo 0; else echo 1; fi)" "nested only returns 1" || return
 }
 
 t_unit_fn_suite_handler() {
